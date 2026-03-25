@@ -1,0 +1,302 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/mom dist/mom-linux-${{ matrix.arch }}
+          chmod +x dist/mom-linux-${{ matrix.arch }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist/mom-linux-${{ matrix.arch }}
+
+  build-deb:
+    name: Build .deb (${{ matrix.distro }})
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian-latest
+            image: debian:bookworm
+            arch: amd64
+          - distro: ubuntu-2204
+            image: ubuntu:22.04
+            arch: amd64
+          - distro: ubuntu-2404
+            image: ubuntu:24.04
+            arch: amd64
+          - distro: ubuntu-2604
+            image: ubuntu:26.04
+            arch: amd64
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist
+
+      - name: Install packaging tools
+        run: |
+          apt-get update
+          apt-get install -y dpkg-dev fakeroot
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb package
+        run: |
+          PKG_ROOT="pkg-deb"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          mkdir -p "${PKG_ROOT}/DEBIAN"
+          mkdir -p "${PKG_ROOT}/usr/bin"
+          mkdir -p "${PKG_ROOT}/usr/share/man/man8"
+          mkdir -p "${PKG_ROOT}/usr/share/bash-completion/completions"
+          mkdir -p "${PKG_ROOT}/etc/logrotate.d"
+          mkdir -p "${PKG_ROOT}/etc/mom"
+
+          # Binary
+          cp dist/mom-linux-${{ matrix.arch }} "${PKG_ROOT}/usr/bin/mom"
+          chmod 755 "${PKG_ROOT}/usr/bin/mom"
+
+          # Man page (placeholder — replaced once man page source exists)
+          if [ -f doc/mom.8 ]; then
+            cp doc/mom.8 "${PKG_ROOT}/usr/share/man/man8/mom.8"
+            gzip -9 "${PKG_ROOT}/usr/share/man/man8/mom.8"
+          fi
+
+          # Bash completions (placeholder)
+          if [ -f completions/mom.bash ]; then
+            cp completions/mom.bash "${PKG_ROOT}/usr/share/bash-completion/completions/mom"
+          fi
+
+          # Logrotate config
+          cat > "${PKG_ROOT}/etc/logrotate.d/mom" <<'LOGROTATE'
+          /var/log/mom.log {
+              monthly
+              rotate 12
+              compress
+              delaycompress
+              missingok
+              notifempty
+              create 0640 root root
+          }
+          LOGROTATE
+
+          # Default config (marked as conffile)
+          cat > "${PKG_ROOT}/etc/mom/mom.conf" <<'CONF'
+          # mom configuration — see man mom(8) for details
+          # group = mom
+          # deny_list = /etc/mom/deny.list
+          # log_file = /var/log/mom.log
+          # http_proxy =
+          # https_proxy =
+          CONF
+
+          # Control file
+          cat > "${PKG_ROOT}/DEBIAN/control" <<CONTROL
+          Package: mom
+          Version: ${VERSION}
+          Section: admin
+          Priority: optional
+          Architecture: ${{ matrix.arch }}
+          Maintainer: Dirk Petersen <dirk@petersen.dev>
+          Description: Meta Overlay Manager
+           Allow non-root users to install and update packages
+           via apt-get or dnf with setuid privilege escalation.
+          CONTROL
+
+          # Conffiles
+          echo "/etc/mom/mom.conf" > "${PKG_ROOT}/DEBIAN/conffiles"
+
+          fakeroot dpkg-deb --build "${PKG_ROOT}" "mom_${VERSION}_${{ matrix.distro }}_${{ matrix.arch }}.deb"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.distro }}-${{ matrix.arch }}
+          path: "*.deb"
+
+  build-rpm:
+    name: Build .rpm (${{ matrix.distro }})
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: el9
+            image: rockylinux:9
+            arch: amd64
+          - distro: el10
+            image: rockylinux:10
+            arch: amd64
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist
+
+      - name: Install packaging tools
+        run: dnf install -y rpm-build
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .rpm package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          mkdir -p ~/rpmbuild/SOURCES/mom-${VERSION}
+
+          cp dist/mom-linux-${{ matrix.arch }} ~/rpmbuild/SOURCES/mom-${VERSION}/mom
+          chmod 755 ~/rpmbuild/SOURCES/mom-${VERSION}/mom
+
+          # Copy optional doc/completion files if they exist
+          [ -f doc/mom.8 ] && cp doc/mom.8 ~/rpmbuild/SOURCES/mom-${VERSION}/
+          [ -f completions/mom.bash ] && cp completions/mom.bash ~/rpmbuild/SOURCES/mom-${VERSION}/
+
+          cd ~/rpmbuild/SOURCES && tar czf mom-${VERSION}.tar.gz mom-${VERSION}
+
+          cat > ~/rpmbuild/SPECS/mom.spec <<SPEC
+          Name:           mom
+          Version:        ${VERSION}
+          Release:        1%{?dist}
+          Summary:        Meta Overlay Manager
+          License:        MIT
+          Source0:        mom-${VERSION}.tar.gz
+
+          %description
+          Allow non-root users to install and update packages
+          via apt-get or dnf with setuid privilege escalation.
+
+          %prep
+          %setup -q
+
+          %install
+          install -Dm755 mom %{buildroot}/usr/bin/mom
+          install -Dm644 /dev/null %{buildroot}/etc/mom/mom.conf
+          cat > %{buildroot}/etc/mom/mom.conf <<'CONF'
+          # mom configuration — see man mom(8) for details
+          # group = mom
+          # deny_list = /etc/mom/deny.list
+          # log_file = /var/log/mom.log
+          # http_proxy =
+          # https_proxy =
+          CONF
+          mkdir -p %{buildroot}/etc/logrotate.d
+          cat > %{buildroot}/etc/logrotate.d/mom <<'LOGROTATE'
+          /var/log/mom.log {
+              monthly
+              rotate 12
+              compress
+              delaycompress
+              missingok
+              notifempty
+              create 0640 root root
+          }
+          LOGROTATE
+
+          %files
+          /usr/bin/mom
+          %config(noreplace) /etc/mom/mom.conf
+          /etc/logrotate.d/mom
+
+          %changelog
+          SPEC
+
+          rpmbuild -bb ~/rpmbuild/SPECS/mom.spec
+
+          cp ~/rpmbuild/RPMS/x86_64/mom-*.rpm "${GITHUB_WORKSPACE}/mom-${VERSION}.${{ matrix.distro }}.x86_64.rpm" 2>/dev/null || \
+          cp ~/rpmbuild/RPMS/noarch/mom-*.rpm "${GITHUB_WORKSPACE}/mom-${VERSION}.${{ matrix.distro }}.noarch.rpm"
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ matrix.distro }}-${{ matrix.arch }}
+          path: "*.rpm"
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-deb, build-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "mom ${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/*
