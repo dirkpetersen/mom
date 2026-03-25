@@ -381,6 +381,12 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

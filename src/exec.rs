@@ -3,6 +3,8 @@ use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execve, fork, ForkResult};
 use std::ffi::CString;
+use std::fs::File;
+use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::config::Config;
@@ -46,12 +48,24 @@ pub fn refresh(pm: &PackageManager, _yes: bool, cfg: &Config) -> Result<i32> {
 
 /// Check whether a package is currently installed.
 ///
-/// Debian: `dpkg-query --status <pkg>` exits 0 if installed.
+/// Debian: `dpkg-query -W -f='${db:Status-Abbrev}' <pkg>` — exits 0 and outputs
+///         "ii " for installed, "rc " for config-files (removed but not purged).
+///         We require "ii " to distinguish truly installed packages.
 /// RHEL:   `rpm -q <pkg>` exits 0 if installed.
 pub fn is_installed(pm: &PackageManager, package: &str, cfg: &Config) -> Result<bool> {
     let args = pm.is_installed_cmd_args(package);
     let rc = run_pkg_cmd_silent(pm.is_installed_binary(), &args, cfg)?;
-    Ok(rc == 0)
+    if rc != 0 {
+        return Ok(false);
+    }
+    // For Apt, exit code 0 is ambiguous (config-files state also returns 0).
+    // Re-check with output capture to verify "ii " (truly installed).
+    if *pm == PackageManager::Apt {
+        let env = build_env(cfg);
+        let output = run_capture(pm.is_installed_binary(), &args, &env)?;
+        return Ok(output.starts_with("ii"));
+    }
+    Ok(true)
 }
 
 /// Fork and exec `binary` with `args`, forwarding stdin/stdout/stderr to the
@@ -66,6 +80,63 @@ fn run_pkg_cmd(binary: &str, args: &[String], cfg: &Config) -> Result<i32> {
 fn run_pkg_cmd_silent(binary: &str, args: &[String], cfg: &Config) -> Result<i32> {
     let env = build_env(cfg);
     run_execve(binary, args, &env, true)
+}
+
+/// Run a command and capture its stdout (for parsing output like dpkg-query status).
+/// Stderr is redirected to /dev/null. Returns trimmed stdout as a String.
+fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<String> {
+    let c_binary = CString::new(binary).context("binary path contains null byte")?;
+    let mut c_args: Vec<CString> = Vec::with_capacity(args.len() + 1);
+    c_args.push(c_binary.clone());
+    for arg in args {
+        c_args.push(CString::new(arg.as_str()).context("argument contains null byte")?);
+    }
+    let c_env: Vec<CString> = env
+        .iter()
+        .map(|e| CString::new(e.as_str()).context("env var contains null byte"))
+        .collect::<Result<_>>()?;
+
+    // Create a pipe for capturing stdout
+    let mut pipe_fds = [0i32; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        anyhow::bail!("pipe() failed: {}", std::io::Error::last_os_error());
+    }
+    let (pipe_read, pipe_write) = (pipe_fds[0], pipe_fds[1]);
+
+    match unsafe { fork() }.context("fork failed")? {
+        ForkResult::Child => {
+            unsafe {
+                libc::close(pipe_read);
+                libc::dup2(pipe_write, libc::STDOUT_FILENO);
+                libc::close(pipe_write);
+                // Stderr to /dev/null
+                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+                if devnull >= 0 {
+                    libc::dup2(devnull, libc::STDERR_FILENO);
+                    libc::close(devnull);
+                }
+            }
+            let _ = execve(&c_binary, &c_args, &c_env);
+            unsafe { libc::_exit(127) };
+        }
+        ForkResult::Parent { child } => {
+            unsafe { libc::close(pipe_write) };
+            // Read stdout from pipe
+            let mut output = String::new();
+            let mut file = unsafe { File::from_raw_fd(pipe_read) };
+            use std::io::Read;
+            let _ = file.read_to_string(&mut output);
+            // Wait for child
+            loop {
+                match waitpid(child, None) {
+                    Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => break,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    _ => continue,
+                }
+            }
+            Ok(output.trim().to_string())
+        }
+    }
 }
 
 fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Result<i32> {

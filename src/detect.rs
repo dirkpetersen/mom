@@ -54,7 +54,14 @@ impl PackageManager {
 
     pub fn is_installed_cmd_args(&self, package: &str) -> Vec<String> {
         match self {
-            PackageManager::Apt => vec!["--status".to_string(), package.to_string()],
+            // Use -W with status abbreviation format to distinguish truly installed
+            // packages (ii) from config-files state (rc). dpkg-query --status returns
+            // exit 0 for both, which would let 'mom update' operate on removed packages.
+            PackageManager::Apt => vec![
+                "-W".to_string(),
+                "-f=${db:Status-Abbrev}".to_string(),
+                package.to_string(),
+            ],
             PackageManager::Dnf => vec!["-q".to_string(), package.to_string()],
         }
     }
@@ -165,7 +172,7 @@ mod tests {
     fn test_apt_is_installed_args() {
         let pm = PackageManager::Apt;
         let args = pm.is_installed_cmd_args("curl");
-        assert_eq!(args, vec!["--status", "curl"]);
+        assert_eq!(args, vec!["-W", "-f=${db:Status-Abbrev}", "curl"]);
     }
 
     #[test]

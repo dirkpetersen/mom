@@ -64,11 +64,12 @@ impl Config {
         validate_config_path(&deny_list, "deny_list")?;
         validate_config_path(&log_file, "log_file")?;
 
-        // Validate group name: alphanumeric, hyphens, underscores only
+        // Validate group name: ASCII alphanumeric, hyphens, underscores only
+        // (Linux group names are restricted to ASCII; Unicode would silently fail)
         if group.is_empty()
             || !group
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             bail!(
                 "config error: group name '{}' contains invalid characters",
