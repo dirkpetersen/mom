@@ -145,7 +145,7 @@ Two workflows in `.github/workflows/`:
 **`release.yml`** — triggered by pushing a version tag (`v*.*.*`):
 1. Builds release binaries for x86_64 and aarch64
 2. Builds `.deb` packages in distro-specific containers (Debian bookworm, Ubuntu 22.04/24.04/26.04)
-3. Builds `.rpm` packages in distro-specific containers (Rocky Linux 9, 10 — RHEL-compatible)
+3. Builds `.rpm` packages in distro-specific containers (Rocky Linux 9, AlmaLinux 10 — RHEL-compatible)
 4. Publishes all artifacts + standalone binaries to a GitHub Release
 
 To cut a release:

@@ -182,7 +182,7 @@ jobs:
             image: rockylinux:9
             arch: amd64
           - distro: el10
-            image: rockylinux:10
+            image: almalinux:10
             arch: amd64
     container:
       image: ${{ matrix.image }}
@@ -278,7 +278,8 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-deb, build-rpm]
+    needs: [build-binaries, build-deb, build-rpm]
+    if: always() && needs.build-binaries.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
