@@ -92,6 +92,14 @@ impl AuditLogger {
         Ok(())
     }
 
+    /// Replace control characters (newlines, tabs, etc.) with underscores
+    /// to prevent syslog injection via crafted usernames from NSS/LDAP.
+    fn sanitize_for_syslog(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_control() { '_' } else { c })
+            .collect()
+    }
+
     fn write_to_syslog(&self, entry: &Entry, json: &str) {
         let formatter = Formatter3164 {
             facility: Facility::LOG_AUTH,
@@ -101,12 +109,12 @@ impl AuditLogger {
         };
         let msg = format!(
             "user={} uid={} op={} packages=[{}] outcome={} detail={}",
-            entry.real_user,
+            Self::sanitize_for_syslog(&entry.real_user),
             entry.real_uid,
             entry.operation,
             entry.packages.join(","),
             entry.outcome,
-            entry.detail.as_deref().unwrap_or("-"),
+            Self::sanitize_for_syslog(entry.detail.as_deref().unwrap_or("-")),
         );
         if let Ok(mut writer) = syslog::unix(formatter) {
             let _ = if entry.outcome == "success" || entry.outcome == "initiated" {

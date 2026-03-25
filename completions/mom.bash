@@ -9,29 +9,27 @@ _mom() {
     local subcommands="install update refresh"
     local global_opts="-y --yes --check --version --help"
 
+    # Helper: complete from installed packages (for update subcommand)
+    _mom_installed_pkgs() {
+        if command -v dpkg-query &>/dev/null; then
+            mapfile -t COMPREPLY < <(dpkg-query -W -f='${Package}\n' 2>/dev/null | grep -F -- "$cur")
+        elif command -v rpm &>/dev/null; then
+            mapfile -t COMPREPLY < <(rpm -qa --qf '%{NAME}\n' 2>/dev/null | grep -F -- "$cur")
+        fi
+    }
+
     case "$prev" in
         mom)
             COMPREPLY=( $(compgen -W "$subcommands $global_opts" -- "$cur") )
             return
             ;;
         install|update)
-            # Offer installed packages for update, or all available for install
             if [[ "$prev" == "update" ]]; then
-                # Complete from installed packages if dpkg/rpm is available
-                if command -v dpkg-query &>/dev/null; then
-                    local pkgs
-                    pkgs=$(dpkg-query -W -f='${Package}\n' 2>/dev/null)
-                    COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") )
-                elif command -v rpm &>/dev/null; then
-                    local pkgs
-                    pkgs=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null)
-                    COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") )
-                fi
+                _mom_installed_pkgs
             fi
             return
             ;;
         refresh)
-            # No further arguments
             return
             ;;
         --check|--version|--help)
@@ -50,17 +48,7 @@ _mom() {
 
     if [[ -n "$subcmd" ]]; then
         case "$subcmd" in
-            install|update)
-                if [[ "$subcmd" == "update" ]] && command -v dpkg-query &>/dev/null; then
-                    local pkgs
-                    pkgs=$(dpkg-query -W -f='${Package}\n' 2>/dev/null)
-                    COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") )
-                elif [[ "$subcmd" == "update" ]] && command -v rpm &>/dev/null; then
-                    local pkgs
-                    pkgs=$(rpm -qa --qf '%{NAME}\n' 2>/dev/null)
-                    COMPREPLY=( $(compgen -W "$pkgs" -- "$cur") )
-                fi
-                ;;
+            update) _mom_installed_pkgs ;;
         esac
     else
         COMPREPLY=( $(compgen -W "$subcommands $global_opts" -- "$cur") )

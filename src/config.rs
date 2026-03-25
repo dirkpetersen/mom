@@ -47,19 +47,39 @@ impl Config {
 
         let map = parse_kv(BufReader::new(file))?;
 
+        let deny_list = map
+            .get("deny_list")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_DENY_LIST.to_string());
+        let log_file = map
+            .get("log_file")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_LOG_FILE.to_string());
+        let group = map
+            .get("group")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_GROUP.to_string());
+
+        // Validate paths are absolute and free of null bytes
+        validate_config_path(&deny_list, "deny_list")?;
+        validate_config_path(&log_file, "log_file")?;
+
+        // Validate group name: alphanumeric, hyphens, underscores only
+        if group.is_empty()
+            || !group
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!(
+                "config error: group name '{}' contains invalid characters",
+                group
+            );
+        }
+
         let cfg = Config {
-            group: map
-                .get("group")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_GROUP.to_string()),
-            deny_list: map
-                .get("deny_list")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_DENY_LIST.to_string()),
-            log_file: map
-                .get("log_file")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_LOG_FILE.to_string()),
+            group,
+            deny_list,
+            log_file,
             http_proxy: map
                 .get("http_proxy")
                 .cloned()
@@ -123,6 +143,17 @@ pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership)
         }
     }
 
+    Ok(())
+}
+
+/// Validate that a config path value is absolute and contains no null bytes.
+fn validate_config_path(path: &str, key: &str) -> Result<()> {
+    if path.contains('\0') {
+        bail!("config error: {key} contains null byte");
+    }
+    if !path.starts_with('/') {
+        bail!("config error: {key} must be an absolute path, got: {path:?}");
+    }
     Ok(())
 }
 

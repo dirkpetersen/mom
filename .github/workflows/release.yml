@@ -94,7 +94,13 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid version tag: $VERSION (must be semver)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build .deb package
         run: |
@@ -233,7 +239,13 @@ jobs:
 
       - name: Get version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid version tag: $VERSION (must be semver)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build .rpm package
         run: |
@@ -245,9 +257,9 @@ jobs:
           cp dist/mom-linux-${{ matrix.arch }} ~/rpmbuild/SOURCES/mom-${VERSION}/mom
           chmod 755 ~/rpmbuild/SOURCES/mom-${VERSION}/mom
 
-          # Copy optional doc/completion files if they exist
-          [ -f doc/mom.8 ] && cp doc/mom.8 ~/rpmbuild/SOURCES/mom-${VERSION}/
-          [ -f completions/mom.bash ] && cp completions/mom.bash ~/rpmbuild/SOURCES/mom-${VERSION}/
+          # Copy doc and completion files (these are checked into the repo)
+          cp doc/mom.8 ~/rpmbuild/SOURCES/mom-${VERSION}/
+          cp completions/mom.bash ~/rpmbuild/SOURCES/mom-${VERSION}/
 
           cd ~/rpmbuild/SOURCES && tar czf mom-${VERSION}.tar.gz mom-${VERSION}
 
@@ -278,12 +290,8 @@ jobs:
           # https_proxy =
           CONF
           touch %{buildroot}/etc/mom/deny.list
-          if [ -f mom.8 ]; then
-            install -Dm644 mom.8 %{buildroot}/usr/share/man/man8/mom.8
-          fi
-          if [ -f mom.bash ]; then
-            install -Dm644 mom.bash %{buildroot}/usr/share/bash-completion/completions/mom
-          fi
+          install -Dm644 mom.8 %{buildroot}/usr/share/man/man8/mom.8
+          install -Dm644 mom.bash %{buildroot}/usr/share/bash-completion/completions/mom
           mkdir -p %{buildroot}/etc/logrotate.d
           cat > %{buildroot}/etc/logrotate.d/mom <<'LOGROTATE'
           /var/log/mom.log {

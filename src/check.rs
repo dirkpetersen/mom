@@ -175,9 +175,12 @@ fn check_binary_permissions(errors: &mut usize, warnings: &mut usize) {
             "permissions: {mode_octal:04o} (group-restricted setuid — recommended)"
         ));
     } else if mode_octal == 0o4755 {
-        ok(&format!(
-            "permissions: {mode_octal:04o} (open setuid — any user can execute)"
+        warn(&format!(
+            "permissions: {mode_octal:04o} (open setuid — any local user can execute, \
+             including 'mom refresh' which runs a privileged network operation as root. \
+             Consider 4750 with group restriction instead)"
         ));
+        *warnings += 1;
     } else {
         warn(&format!(
             "permissions: {mode_octal:04o} (expected 4750 or 4755)"

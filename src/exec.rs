@@ -122,22 +122,30 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
                 .context("failed to unblock signals after fork")?;
 
             loop {
-                match waitpid(child, None).context("waitpid failed")? {
-                    WaitStatus::Exited(_, code) => {
+                match waitpid(child, None) {
+                    Ok(WaitStatus::Exited(_, code)) => {
                         CHILD_PID.store(-1, Ordering::SeqCst);
                         return Ok(code);
                     }
-                    WaitStatus::Signaled(_, sig, _) => {
+                    Ok(WaitStatus::Signaled(_, sig, _)) => {
                         CHILD_PID.store(-1, Ordering::SeqCst);
                         // Re-raise so our exit status reflects the signal
                         let _ = signal::raise(sig);
                         return Ok(128 + sig as i32);
                     }
-                    WaitStatus::Stopped(_, _)
-                    | WaitStatus::Continued(_)
-                    | WaitStatus::StillAlive => continue,
+                    Ok(WaitStatus::Stopped(_, _))
+                    | Ok(WaitStatus::Continued(_))
+                    | Ok(WaitStatus::StillAlive) => continue,
                     #[cfg(any(target_os = "linux", target_os = "android"))]
-                    WaitStatus::PtraceEvent(_, _, _) | WaitStatus::PtraceSyscall(_) => continue,
+                    Ok(WaitStatus::PtraceEvent(_, _, _)) | Ok(WaitStatus::PtraceSyscall(_)) => {
+                        continue
+                    }
+                    // EINTR from signal delivery — retry waitpid
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => {
+                        CHILD_PID.store(-1, Ordering::SeqCst);
+                        return Err(e).context("waitpid failed");
+                    }
                 }
             }
         }
@@ -146,7 +154,7 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
 
 fn setup_signal_forwarding() -> Result<()> {
     let handler = SigHandler::Handler(forward_signal);
-    let action = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
+    let action = SigAction::new(handler, SaFlags::SA_RESTART, SigSet::empty());
     // SAFETY: Our handler is async-signal-safe (only calls kill(2) and an atomic load).
     unsafe {
         signal::sigaction(Signal::SIGINT, &action).context("failed to set SIGINT handler")?;
