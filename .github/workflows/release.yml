@@ -162,6 +162,39 @@ jobs:
           # Conffiles
           echo "/etc/mom/mom.conf" > "${PKG_ROOT}/DEBIAN/conffiles"
 
+          # Post-install script: create group, set permissions, create dirs/files
+          cat > "${PKG_ROOT}/DEBIAN/postinst" <<'POSTINST'
+          #!/bin/sh
+          set -e
+          # Create mom group if it doesn't exist
+          getent group mom >/dev/null 2>&1 || groupadd -r mom
+          # Set binary ownership and setuid bit (group-restricted)
+          chown root:mom /usr/bin/mom
+          chmod 4750 /usr/bin/mom
+          # Create config directory
+          mkdir -p /etc/mom
+          chown root:root /etc/mom
+          chmod 755 /etc/mom
+          # Create deny list if absent
+          if [ ! -f /etc/mom/deny.list ]; then
+            touch /etc/mom/deny.list
+          fi
+          chown root:mom /etc/mom/deny.list
+          chmod 640 /etc/mom/deny.list
+          # Create log file if absent
+          if [ ! -f /var/log/mom.log ]; then
+            touch /var/log/mom.log
+          fi
+          chown root:root /var/log/mom.log
+          chmod 640 /var/log/mom.log
+          echo ""
+          echo "mom installed successfully!"
+          echo "Add users to the 'mom' group to allow them to install packages:"
+          echo "  sudo usermod -aG mom <username>"
+          echo ""
+          POSTINST
+          chmod 755 "${PKG_ROOT}/DEBIAN/postinst"
+
           fakeroot dpkg-deb --build "${PKG_ROOT}" "mom_${VERSION}_${{ matrix.distro }}_${{ matrix.arch }}.deb"
 
       - name: Upload .deb artifact
@@ -244,6 +277,13 @@ jobs:
           # http_proxy =
           # https_proxy =
           CONF
+          touch %{buildroot}/etc/mom/deny.list
+          if [ -f mom.8 ]; then
+            install -Dm644 mom.8 %{buildroot}/usr/share/man/man8/mom.8
+          fi
+          if [ -f mom.bash ]; then
+            install -Dm644 mom.bash %{buildroot}/usr/share/bash-completion/completions/mom
+          fi
           mkdir -p %{buildroot}/etc/logrotate.d
           cat > %{buildroot}/etc/logrotate.d/mom <<'LOGROTATE'
           /var/log/mom.log {
@@ -257,9 +297,35 @@ jobs:
           }
           LOGROTATE
 
+          %post
+          # Create mom group if it doesn't exist
+          getent group mom >/dev/null 2>&1 || groupadd -r mom
+          # Set binary ownership and setuid bit (group-restricted)
+          chown root:mom /usr/bin/mom
+          chmod 4750 /usr/bin/mom
+          # Create deny list if absent
+          if [ ! -f /etc/mom/deny.list ]; then
+            touch /etc/mom/deny.list
+          fi
+          chown root:mom /etc/mom/deny.list
+          chmod 640 /etc/mom/deny.list
+          # Create log file if absent
+          if [ ! -f /var/log/mom.log ]; then
+            touch /var/log/mom.log
+          fi
+          chown root:root /var/log/mom.log
+          chmod 640 /var/log/mom.log
+          echo ""
+          echo "mom installed successfully!"
+          echo "Add users to the 'mom' group to allow them to install packages:"
+          echo "  sudo usermod -aG mom <username>"
+          echo ""
+
           %files
           /usr/bin/mom
           %config(noreplace) /etc/mom/mom.conf
+          %config(noreplace) /etc/mom/deny.list
+          %dir /etc/mom
           /etc/logrotate.d/mom
 
           %changelog

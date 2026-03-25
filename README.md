@@ -37,53 +37,68 @@ Add `-y` to suppress interactive prompts — same semantics as `apt-get -y` and 
 
 ## Installation
 
-Download packages from [GitHub Releases](https://github.com/dirkpetersen/mom/releases):
+Install from [GitHub Releases](https://github.com/dirkpetersen/mom/releases) — the package handles all setup automatically (creates group, sets setuid, creates config dir and log file).
 
-| Platform | Package |
-|----------|---------|
-| Debian (bookworm) | `.deb` |
-| Ubuntu 22.04 LTS | `.deb` |
-| Ubuntu 24.04 LTS | `.deb` |
-| Ubuntu 26.04 LTS | `.deb` |
-| RHEL 9 / Rocky 9 | `.rpm` |
-| RHEL 10 / Rocky 10 | `.rpm` |
-| Any Linux x86_64 | Static binary |
-| Any Linux aarch64 | Static binary |
-
-### Post-install Setup
-
-The sysadmin must configure binary permissions after installing. The package does **not** set the setuid bit automatically.
+### Debian / Ubuntu
 
 ```bash
-# Recommended: only mom group members can run mom (group-restricted setuid)
-groupadd mom
-chown root:mom /usr/bin/mom
-chmod 4750 /usr/bin/mom            # rwsr-x---
-usermod -aG mom alice              # add users as needed
-
-# Alternative: any user can call mom (open setuid)
-chown root:root /usr/bin/mom
-chmod 4755 /usr/bin/mom            # rwsr-xr-x
+# Pick the right .deb for your distro:
+wget https://github.com/dirkpetersen/mom/releases/latest/download/mom_0.2.0_ubuntu-2404_amd64.deb
+sudo dpkg -i mom_0.2.0_ubuntu-2404_amd64.deb
 ```
 
-#### Completing the setup
+Available packages: `mom_0.2.0_debian-latest_amd64.deb`, `mom_0.2.0_ubuntu-2204_amd64.deb`, `mom_0.2.0_ubuntu-2404_amd64.deb`, `mom_0.2.0_ubuntu-2604_amd64.deb`
+
+### RHEL / Rocky / Alma
 
 ```bash
-# Create config directory
-mkdir -p /etc/mom
-chown root:root /etc/mom && chmod 755 /etc/mom
+sudo dnf install https://github.com/dirkpetersen/mom/releases/latest/download/mom-0.2.0.el9.x86_64.rpm
+```
 
-# Create deny list (required ownership check)
-touch /etc/mom/deny.list
-chown root:mom /etc/mom/deny.list && chmod 640 /etc/mom/deny.list
+Available packages: `mom-0.2.0.el9.x86_64.rpm`, `mom-0.2.0.el10.x86_64.rpm`
 
-# Create log file
-touch /var/log/mom.log
-chown root:root /var/log/mom.log && chmod 640 /var/log/mom.log
+### After Install
 
-# Verify
+The package automatically:
+- Creates the `mom` group
+- Sets the binary to setuid root with group-restricted permissions (`4750`)
+- Creates `/etc/mom/` with a default config and empty deny list
+- Creates `/var/log/mom.log`
+
+**Just add users to the group:**
+
+```bash
+sudo usermod -aG mom alice
+sudo usermod -aG mom bob
+```
+
+Then verify:
+```bash
 mom --check
 ```
+
+### Standalone Binary (any Linux)
+
+For systems without .deb/.rpm, download the static binary and set it up manually:
+
+```bash
+sudo cp mom-linux-amd64 /usr/bin/mom
+sudo groupadd -r mom
+sudo chown root:mom /usr/bin/mom
+sudo chmod 4750 /usr/bin/mom
+sudo mkdir -p /etc/mom
+sudo touch /etc/mom/deny.list && sudo chown root:mom /etc/mom/deny.list && sudo chmod 640 /etc/mom/deny.list
+sudo touch /var/log/mom.log && sudo chmod 640 /var/log/mom.log
+```
+
+| Platform | Download |
+|----------|----------|
+| Debian (bookworm) | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
+| Ubuntu 22.04 / 24.04 / 26.04 | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
+| RHEL 9 / Rocky 9 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
+| RHEL 10 / Alma 10 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
+| Any Linux x86_64 | [binary](https://github.com/dirkpetersen/mom/releases/latest) |
+| Any Linux aarch64 | [binary](https://github.com/dirkpetersen/mom/releases/latest) |
 
 ## Configuration
 
@@ -182,8 +197,8 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ## Releasing
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The release workflow builds `.deb` and `.rpm` packages for all supported
