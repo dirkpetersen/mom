@@ -327,8 +327,12 @@ jobs:
           %config(noreplace) /etc/mom/deny.list
           %dir /etc/mom
           /etc/logrotate.d/mom
+          /usr/share/man/man8/mom.8*
+          /usr/share/bash-completion/completions/mom
 
           %changelog
+          * $(date '+%a %b %d %Y') Dirk Petersen <dirk@petersen.dev> - ${VERSION}-1
+          - Release ${VERSION}
           SPEC
 
           rpmbuild -bb ~/rpmbuild/SPECS/mom.spec
