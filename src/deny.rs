@@ -1,8 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::MetadataExt;
+
+use crate::config::{validate_file_metadata, FileOwnership};
 
 /// A compiled deny list loaded from the configured deny_list path.
 pub struct DenyList {
@@ -15,18 +16,28 @@ pub struct DenyList {
 impl DenyList {
     /// Load and compile the deny list from `path`.
     /// If the file does not exist, returns an empty deny list (no denials).
-    /// Validates that the file is owned by the `mom` group (or the configured group).
-    pub fn load(path: &str) -> Result<Self> {
-        if !std::path::Path::new(path).exists() {
-            return Ok(DenyList {
-                globset: GlobSet::empty(),
-                patterns: vec![],
-            });
-        }
+    /// Validates ownership using open-then-fstat to avoid TOCTOU.
+    /// `group_gid` is the resolved GID of the configured group (for ownership check).
+    pub fn load(path: &str, group_gid: Option<u32>) -> Result<Self> {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DenyList {
+                    globset: GlobSet::empty(),
+                    patterns: vec![],
+                });
+            }
+            Err(e) => return Err(e).with_context(|| format!("cannot open deny list {path}")),
+        };
 
-        validate_deny_list_file(path)?;
+        // SECURITY: validate using fstat on the already-opened fd to prevent TOCTOU.
+        // Deny list must be owned by root or the mom group.
+        let ownership = match group_gid {
+            Some(gid) => FileOwnership::RootOrGroup(gid),
+            None => FileOwnership::Root,
+        };
+        validate_file_metadata(&file, path, ownership)?;
 
-        let file = File::open(path).with_context(|| format!("cannot open deny list {path}"))?;
         Self::parse(BufReader::new(file), path)
     }
 
@@ -71,50 +82,6 @@ impl DenyList {
     pub fn len(&self) -> usize {
         self.patterns.len()
     }
-}
-
-/// The deny list file must be:
-/// - owned by the `mom` group (gid check)
-/// - not world-writable
-fn validate_deny_list_file(path: &str) -> Result<()> {
-    let meta = std::fs::metadata(path).with_context(|| format!("cannot stat deny list {path}"))?;
-
-    // Must not be world-writable
-    if meta.mode() & 0o002 != 0 {
-        bail!("security error: deny list {path} is world-writable — refusing to read");
-    }
-
-    // Owned by root or the mom group — we verify gid != world-accessible
-    // The config group name is validated separately; here we just ensure
-    // uid 0 or gid 0 (or the mom group gid) owns the file.
-    // Full group-name→gid validation happens in auth::check_deny_list_ownership.
-    // Here we do a minimal sanity check: not owned by a random unprivileged user.
-    if meta.uid() != 0 {
-        // Allow if owned by root. If not owned by root, the group must own it
-        // and that group check is done via auth. We warn but still accept here
-        // so sysadmins can set gid-ownership without root uid.
-    }
-
-    Ok(())
-}
-
-/// Validate that the deny list is owned by the expected group (by GID).
-/// Called after we resolve the group name → gid.
-pub fn check_deny_list_group_ownership(path: &str, expected_gid: u32) -> Result<()> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(()); // missing → empty list, already handled
-    }
-    let meta = std::fs::metadata(path).with_context(|| format!("cannot stat deny list {path}"))?;
-
-    if meta.uid() != 0 && meta.gid() != expected_gid {
-        bail!(
-            "security error: deny list {path} must be owned by root or \
-             gid {expected_gid} (found uid={} gid={})",
-            meta.uid(),
-            meta.gid()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

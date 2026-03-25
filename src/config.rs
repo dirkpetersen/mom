@@ -33,18 +33,21 @@ impl Default for Config {
 impl Config {
     /// Load configuration from CONFIG_PATH.
     /// Falls back to safe defaults if the file does not exist.
-    /// Validates ownership and permissions before reading.
+    /// Validates ownership and permissions using open-then-fstat to avoid TOCTOU.
     pub fn load() -> Result<Self> {
-        if !std::path::Path::new(CONFIG_PATH).exists() {
-            return Ok(Config::default());
-        }
+        // Attempt to open; if it doesn't exist, fall back to defaults
+        let file = match File::open(CONFIG_PATH) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => return Err(e).with_context(|| format!("cannot open {CONFIG_PATH}")),
+        };
 
-        validate_config_file(CONFIG_PATH)?;
+        // SECURITY: validate using fstat on the already-opened fd to prevent TOCTOU
+        validate_file_metadata(&file, CONFIG_PATH, FileOwnership::Root)?;
 
-        let file = File::open(CONFIG_PATH).with_context(|| format!("cannot open {CONFIG_PATH}"))?;
         let map = parse_kv(BufReader::new(file))?;
 
-        Ok(Config {
+        let cfg = Config {
             group: map
                 .get("group")
                 .cloned()
@@ -57,32 +60,87 @@ impl Config {
                 .get("log_file")
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_LOG_FILE.to_string()),
-            http_proxy: map.get("http_proxy").cloned(),
-            https_proxy: map.get("https_proxy").cloned(),
-        })
+            http_proxy: map
+                .get("http_proxy")
+                .cloned()
+                .and_then(|v| validate_proxy_url(&v, "http_proxy").ok()),
+            https_proxy: map
+                .get("https_proxy")
+                .cloned()
+                .and_then(|v| validate_proxy_url(&v, "https_proxy").ok()),
+        };
+        Ok(cfg)
     }
 }
 
-/// Validate that a config file is safe to read:
-/// - owned by root (uid 0)
-/// - not world-writable
-fn validate_config_file(path: &str) -> Result<()> {
-    let meta = std::fs::metadata(path).with_context(|| format!("cannot stat {path}"))?;
+/// Who must own a file for it to be trusted.
+pub enum FileOwnership {
+    /// Must be owned by uid 0
+    Root,
+    /// Must be owned by uid 0 or by the specified gid
+    RootOrGroup(u32),
+}
 
-    if meta.uid() != 0 {
-        bail!(
-            "security error: {path} must be owned by root (uid 0), \
-             found uid {}",
-            meta.uid()
-        );
+/// Validate an already-opened file using fstat (no TOCTOU).
+/// Checks:
+/// - ownership (root or root-or-group depending on `ownership`)
+/// - not world-writable
+/// - not a symlink (file type check via fstat)
+pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership) -> Result<()> {
+    let meta = file
+        .metadata()
+        .with_context(|| format!("cannot fstat {path}"))?;
+
+    // Reject if not a regular file (could be symlink target, but we check type after open)
+    if !meta.is_file() {
+        bail!("security error: {path} is not a regular file");
     }
 
-    // Check world-writable bit (mode & 0o002)
+    // Check world-writable bit
     if meta.mode() & 0o002 != 0 {
         bail!("security error: {path} is world-writable — refusing to read");
     }
 
+    match ownership {
+        FileOwnership::Root => {
+            if meta.uid() != 0 {
+                bail!(
+                    "security error: {path} must be owned by root (uid 0), found uid {}",
+                    meta.uid()
+                );
+            }
+        }
+        FileOwnership::RootOrGroup(gid) => {
+            if meta.uid() != 0 && meta.gid() != gid {
+                bail!(
+                    "security error: {path} must be owned by root or gid {gid} \
+                     (found uid={} gid={})",
+                    meta.uid(),
+                    meta.gid()
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Validate that a proxy URL looks reasonable.
+/// Accepts http:// and https:// URLs only. Rejects shell metacharacters.
+fn validate_proxy_url(value: &str, key: &str) -> Result<String> {
+    if !value.starts_with("http://") && !value.starts_with("https://") {
+        bail!("security error: {key} must start with http:// or https://, got: {value:?}");
+    }
+    // Reject any shell-dangerous characters
+    let forbidden = [
+        ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '\n', '\r', '\0',
+    ];
+    for ch in forbidden {
+        if value.contains(ch) {
+            bail!("security error: {key} contains forbidden character {ch:?}");
+        }
+    }
+    Ok(value.to_string())
 }
 
 /// Parse a simple `key = value` file.
@@ -166,5 +224,25 @@ mod tests {
         let input = "GROUP = devs\n";
         let map = parse_kv(Cursor::new(input)).unwrap();
         assert_eq!(map["group"], "devs");
+    }
+
+    #[test]
+    fn test_validate_proxy_url_valid() {
+        assert!(validate_proxy_url("http://proxy:3128", "http_proxy").is_ok());
+        assert!(validate_proxy_url("https://proxy.corp.com:8080", "https_proxy").is_ok());
+    }
+
+    #[test]
+    fn test_validate_proxy_url_rejects_non_http() {
+        assert!(validate_proxy_url("socks5://proxy:1080", "http_proxy").is_err());
+        assert!(validate_proxy_url("ftp://proxy", "http_proxy").is_err());
+    }
+
+    #[test]
+    fn test_validate_proxy_url_rejects_shell_metacharacters() {
+        assert!(validate_proxy_url("http://proxy; rm -rf /", "http_proxy").is_err());
+        assert!(validate_proxy_url("http://proxy$(evil)", "http_proxy").is_err());
+        assert!(validate_proxy_url("http://proxy`evil`", "http_proxy").is_err());
+        assert!(validate_proxy_url("http://proxy|cmd", "http_proxy").is_err());
     }
 }

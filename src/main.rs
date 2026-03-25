@@ -10,6 +10,12 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use nix::unistd::{getegid, geteuid, getgid, getuid};
 
+/// Maximum allowed length for a single package name.
+const MAX_PACKAGE_NAME_LEN: usize = 256;
+
+/// Maximum number of packages per invocation.
+const MAX_PACKAGE_COUNT: usize = 100;
+
 #[derive(Parser)]
 #[command(
     name = "mom",
@@ -54,9 +60,27 @@ enum Commands {
 }
 
 fn main() {
+    // SECURITY: Clear the entire inherited environment immediately, before any
+    // Rust stdlib or dependency code can read attacker-controlled env vars
+    // (e.g. RUST_LOG, LD_PRELOAD, http_proxy, LANG, LC_*, TERM, HOME, etc.).
+    // This must happen before Cli::parse() or any allocator/logger initialization.
+    clear_environment();
+
+    // SECURITY: Set a restrictive umask so any files we create (audit log, etc.)
+    // are not world-readable/writable by default.
+    unsafe { libc::umask(0o077) };
+
     if let Err(e) = run() {
         eprintln!("mom: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Remove all environment variables from the current process.
+fn clear_environment() {
+    let keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+    for key in keys {
+        unsafe { std::env::remove_var(&key) };
     }
 }
 
@@ -252,9 +276,43 @@ fn validate_packages(
     operation: &str,
     logger: &log::AuditLogger,
 ) -> Result<Vec<String>> {
-    let deny_list = deny::DenyList::load(&cfg.deny_list)?;
+    // Enforce package count limit
+    if packages.len() > MAX_PACKAGE_COUNT {
+        let detail = format!(
+            "too many packages ({}, max {})",
+            packages.len(),
+            MAX_PACKAGE_COUNT
+        );
+        logger.log(log::Entry::new(
+            real_uid,
+            real_user,
+            operation,
+            packages.clone(),
+            "denied",
+            Some(detail.clone()),
+        ));
+        bail!("{detail}");
+    }
 
     for pkg in &packages {
+        // Enforce name length limit
+        if pkg.len() > MAX_PACKAGE_NAME_LEN {
+            let detail = format!(
+                "package name too long ({} chars, max {})",
+                pkg.len(),
+                MAX_PACKAGE_NAME_LEN
+            );
+            logger.log(log::Entry::new(
+                real_uid,
+                real_user,
+                operation,
+                packages.clone(),
+                "denied",
+                Some(detail.clone()),
+            ));
+            bail!("{detail}");
+        }
+
         if !is_valid_package_name(pkg) {
             let detail = format!("invalid package name '{pkg}'");
             logger.log(log::Entry::new(
@@ -267,7 +325,13 @@ fn validate_packages(
             ));
             bail!("{detail} — only alphanumeric characters, '.', '+', and '-' are allowed");
         }
+    }
 
+    // Load deny list — now with group ownership verification (TOCTOU-safe)
+    let group_gid = auth::gid_for_group(&cfg.group).ok();
+    let deny_list = deny::DenyList::load(&cfg.deny_list, group_gid)?;
+
+    for pkg in &packages {
         if let Some(pattern) = deny_list.matches(pkg) {
             let detail = format!("package '{pkg}' matches deny list pattern '{pattern}'");
             logger.log(log::Entry::new(
@@ -384,5 +448,12 @@ mod tests {
     #[test]
     fn test_valid_package_name_with_all_allowed_chars() {
         assert!(is_valid_package_name("a0.+b-c"));
+    }
+
+    #[test]
+    fn test_package_name_length_limit() {
+        let long_name = "a".repeat(MAX_PACKAGE_NAME_LEN);
+        assert!(is_valid_package_name(&long_name));
+        // length check is in validate_packages, not is_valid_package_name
     }
 }

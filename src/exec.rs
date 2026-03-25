@@ -13,7 +13,7 @@ static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
 
 /// Signal handler: forward the received signal to the child process.
 extern "C" fn forward_signal(sig: libc::c_int) {
-    let pid = CHILD_PID.load(Ordering::Relaxed);
+    let pid = CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
         // SAFETY: kill(2) is async-signal-safe.
         unsafe { libc::kill(pid, sig) };
@@ -92,28 +92,48 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
     // Set up signal forwarding before fork so the handler is in place
     setup_signal_forwarding()?;
 
+    // Block forwarded signals before fork to prevent race between fork() and
+    // CHILD_PID.store(). Unblock after the store.
+    let mut block_set = SigSet::empty();
+    block_set.add(Signal::SIGINT);
+    block_set.add(Signal::SIGTERM);
+    block_set.add(Signal::SIGHUP);
+    block_set
+        .thread_block()
+        .context("failed to block signals before fork")?;
+
     match unsafe { fork() }.context("fork failed")? {
         ForkResult::Child => {
+            // Unblock signals in child
+            let _ = block_set.thread_unblock();
+
             // Redirect stdout/stderr to /dev/null if silent
             if silent {
                 redirect_to_devnull();
             }
             // exec replaces the child process — no return on success
             let _ = execve(&c_binary, &c_args, &c_env);
-            // execve only returns on error
-            std::process::exit(127);
+            // SECURITY: execve only returns on error. Use _exit() (not std::process::exit)
+            // to avoid running Rust destructors that could flush shared buffers after fork.
+            unsafe { libc::_exit(127) };
         }
         ForkResult::Parent { child } => {
-            CHILD_PID.store(child.as_raw(), Ordering::Relaxed);
+            // Store child PID while signals are still blocked — no race.
+            CHILD_PID.store(child.as_raw(), Ordering::SeqCst);
+
+            // Now unblock signals so forwarding works
+            block_set
+                .thread_unblock()
+                .context("failed to unblock signals after fork")?;
 
             loop {
                 match waitpid(child, None).context("waitpid failed")? {
                     WaitStatus::Exited(_, code) => {
-                        CHILD_PID.store(-1, Ordering::Relaxed);
+                        CHILD_PID.store(-1, Ordering::SeqCst);
                         return Ok(code);
                     }
                     WaitStatus::Signaled(_, sig, _) => {
-                        CHILD_PID.store(-1, Ordering::Relaxed);
+                        CHILD_PID.store(-1, Ordering::SeqCst);
                         // Re-raise so our exit status reflects the signal
                         let _ = signal::raise(sig);
                         return Ok(128 + sig as i32);
@@ -210,8 +230,10 @@ mod tests {
     #[test]
     fn test_build_env_no_sensitive_vars() {
         // Simulate a polluted environment — build_env must not include any of these
-        std::env::set_var("LD_PRELOAD", "/evil.so");
-        std::env::set_var("EVIL_VAR", "injected");
+        unsafe {
+            std::env::set_var("LD_PRELOAD", "/evil.so");
+            std::env::set_var("EVIL_VAR", "injected");
+        }
         let cfg = Config::default();
         let env = build_env(&cfg);
         assert!(!env.iter().any(|e| e.starts_with("LD_PRELOAD=")));
