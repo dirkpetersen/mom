@@ -166,6 +166,7 @@ fn validate_proxy_url(value: &str, key: &str) -> Result<String> {
     // Reject any shell-dangerous characters
     let forbidden = [
         ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '\n', '\r', '\0',
+        ' ', '\t',
     ];
     for ch in forbidden {
         if value.contains(ch) {

@@ -87,6 +87,10 @@ impl AuditLogger {
             let err = std::io::Error::last_os_error();
             anyhow::bail!("cannot open log file {}: {err}", self.log_path);
         }
+        // SECURITY: fchmod after open to set correct mode regardless of umask.
+        // The startup umask(0o077) would strip group-read from 0o640, making
+        // the log unreadable by ops groups. fchmod bypasses the umask.
+        unsafe { libc::fchmod(fd, 0o640) };
         let mut file = unsafe { File::from_raw_fd(fd) };
         writeln!(file, "{json}").with_context(|| format!("cannot write to {}", self.log_path))?;
         Ok(())
@@ -112,7 +116,12 @@ impl AuditLogger {
             Self::sanitize_for_syslog(&entry.real_user),
             entry.real_uid,
             entry.operation,
-            entry.packages.join(","),
+            entry
+                .packages
+                .iter()
+                .map(|p| Self::sanitize_for_syslog(p))
+                .collect::<Vec<_>>()
+                .join(","),
             entry.outcome,
             Self::sanitize_for_syslog(entry.detail.as_deref().unwrap_or("-")),
         );

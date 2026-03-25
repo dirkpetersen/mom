@@ -93,6 +93,7 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
     block_set.add(Signal::SIGINT);
     block_set.add(Signal::SIGTERM);
     block_set.add(Signal::SIGHUP);
+    block_set.add(Signal::SIGQUIT);
     block_set
         .thread_block()
         .context("failed to block signals before fork")?;
@@ -160,6 +161,7 @@ fn setup_signal_forwarding() -> Result<()> {
         signal::sigaction(Signal::SIGINT, &action).context("failed to set SIGINT handler")?;
         signal::sigaction(Signal::SIGTERM, &action).context("failed to set SIGTERM handler")?;
         signal::sigaction(Signal::SIGHUP, &action).context("failed to set SIGHUP handler")?;
+        signal::sigaction(Signal::SIGQUIT, &action).context("failed to set SIGQUIT handler")?;
     }
     Ok(())
 }
