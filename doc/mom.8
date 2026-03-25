@@ -1,0 +1,234 @@
+.TH MOM 8 "2026-03-25" "mom 0.1.0" "System Manager's Manual"
+.SH NAME
+mom \- Meta Overlay Manager: install packages without root access
+.SH SYNOPSIS
+.B mom
+.RB [ \-y ]
+.B install
+.IR package " [" package "...]"
+.br
+.B mom
+.RB [ \-y ]
+.B update
+.IR package " [" package "...]"
+.br
+.B mom
+.B refresh
+.br
+.B mom
+.B \-\-check
+.br
+.B mom
+.B \-\-version
+.SH DESCRIPTION
+.B mom
+(Meta Overlay Manager) allows non-root users to install and update packages
+on systems where they lack root access. It delegates to
+.BR apt-get (8)
+on Debian/Ubuntu systems and
+.BR dnf (8)
+on RHEL/Rocky Linux systems.
+.PP
+.B mom
+must be deployed as a setuid-root binary. Only members of the configured
+group (default:
+.BR mom )
+may perform install and update operations. The
+.B refresh
+subcommand may be run by any user who can execute the binary.
+.SH SUBCOMMANDS
+.TP
+.BI "install " "package " "[package...]"
+Install one or more packages. Package names are validated and checked
+against the deny list before any package manager is invoked.
+.TP
+.BI "update " "package " "[package...]"
+Refresh the package repository metadata, then update the named packages.
+Each package must already be installed; mom will error out rather than
+silently install an unlisted package.
+.TP
+.B refresh
+Refresh package repository metadata only (\fBapt-get update\fR or
+\fBdnf makecache\fR). No group membership check is performed; any user
+who can execute the binary may run this subcommand.
+.SH OPTIONS
+.TP
+.BR \-y ", " \-\-yes
+Suppress interactive prompts. Passed directly to
+.B apt-get
+or
+.BR dnf .
+.TP
+.B \-\-check
+Validate the configuration file and deny list without performing any
+package operations. Prints a summary of all checks performed.
+Intended for sysadmin use.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.B \-\-help
+Print a usage summary and exit.
+.SH CONFIGURATION
+.B mom
+reads
+.I /etc/mom/mom.conf
+at startup. If the file does not exist, safe defaults are used.
+The file must be owned by root and must not be world-writable.
+Format: one
+.BI key " = " value
+pair per line. Lines beginning with
+.B #
+are comments.
+.PP
+Supported keys:
+.TP
+.B group
+Name of the Unix group whose members may run
+.BR mom .
+Default:
+.BR mom .
+.TP
+.B deny_list
+Path to the package deny list file. May reside on a shared filesystem.
+Default:
+.IR /etc/mom/deny.list .
+.TP
+.B log_file
+Path to the JSON audit log.
+Default:
+.IR /var/log/mom.log .
+.TP
+.B http_proxy
+HTTP proxy URL passed to
+.B apt-get
+/
+.BR dnf .
+Not set by default.
+.TP
+.B https_proxy
+HTTPS proxy URL passed to
+.B apt-get
+/
+.BR dnf .
+Not set by default.
+.SH DENY LIST
+The deny list file (default
+.IR /etc/mom/deny.list )
+contains one entry per line. Entries are glob patterns matched against
+package names. Lines beginning with
+.B #
+are comments. Empty lines are ignored.
+.PP
+Example:
+.PP
+.RS
+.nf
+# Block network scanners
+nmap
+wireshark
+
+# Block all Python development headers
+python3-*
+
+# Block all -dev packages
+*-dev
+.fi
+.RE
+.PP
+The deny list file must be owned by root or the configured
+.B mom
+group. It must not be world-writable. If the file does not exist,
+all packages are permitted (subject to other access controls).
+.SH INSTALLATION & SETUP
+.SS "1. Create the mom group"
+.nf
+groupadd mom
+.fi
+.SS "2. Install the binary"
+.nf
+install -o root -g mom -m 4750 /path/to/mom /usr/bin/mom
+.fi
+.PP
+Or, to allow all users to run
+.BR refresh :
+.nf
+install -o root -g root -m 4755 /path/to/mom /usr/bin/mom
+.fi
+.SS "3. Create the configuration directory"
+.nf
+mkdir -p /etc/mom
+chown root:root /etc/mom
+chmod 755 /etc/mom
+.fi
+.SS "4. Create the deny list"
+.nf
+touch /etc/mom/deny.list
+chown root:mom /etc/mom/deny.list
+chmod 640 /etc/mom/deny.list
+.fi
+.SS "5. Create the log file"
+.nf
+touch /var/log/mom.log
+chown root:root /var/log/mom.log
+chmod 640 /var/log/mom.log
+.fi
+.SS "6. Add users to the mom group"
+.nf
+usermod -aG mom alice
+usermod -aG mom bob
+.fi
+.SH SECURITY
+.B mom
+is a setuid-root binary. The following security measures are applied at runtime:
+.IP \(bu 2
+The caller's entire environment is discarded before invoking
+.B apt-get
+or
+.BR dnf .
+.IP \(bu 2
+Package manager binaries are called via hardcoded absolute paths.
+.IP \(bu 2
+Arguments are passed as discrete
+.BR execve (2)
+argv entries — never via a shell.
+.IP \(bu 2
+All supplemental groups are dropped immediately at startup.
+.IP \(bu 2
+Package names are validated against a strict regular expression before use.
+.IP \(bu 2
+All operations (including denied attempts) are logged to
+.I /var/log/mom.log
+and syslog.
+.PP
+See
+.I /usr/share/doc/mom/SECURITY.md
+for the full threat model and security analysis.
+.SH FILES
+.TP
+.I /usr/bin/mom
+The setuid-root binary.
+.TP
+.I /etc/mom/mom.conf
+Configuration file. Must be owned by root.
+.TP
+.I /etc/mom/deny.list
+Package deny list. Must be owned by root or the mom group.
+.TP
+.I /var/log/mom.log
+JSON audit log.
+.TP
+.I /etc/logrotate.d/mom
+Log rotation configuration.
+.SH SEE ALSO
+.BR apt-get (8),
+.BR dnf (8),
+.BR dpkg (1),
+.BR rpm (8),
+.BR sudoers (5),
+.BR groupadd (8),
+.BR usermod (8)
+.SH AUTHORS
+Dirk Petersen
+.SH BUGS
+Report bugs at https://github.com/dirkpetersen/mom/issues
