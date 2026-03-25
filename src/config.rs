@@ -85,6 +85,7 @@ pub enum FileOwnership {
 /// Checks:
 /// - ownership (root or root-or-group depending on `ownership`)
 /// - not world-writable
+/// - not group-writable (security-sensitive files must not be writable by group members)
 /// - not a symlink (file type check via fstat)
 pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership) -> Result<()> {
     let meta = file
@@ -96,9 +97,9 @@ pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership)
         bail!("security error: {path} is not a regular file");
     }
 
-    // Check world-writable bit
-    if meta.mode() & 0o002 != 0 {
-        bail!("security error: {path} is world-writable — refusing to read");
+    // Reject group-writable or world-writable files
+    if meta.mode() & 0o022 != 0 {
+        bail!("security error: {path} is group- or world-writable — refusing to read");
     }
 
     match ownership {

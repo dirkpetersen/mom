@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.2.x   | Yes       |
+| 0.1.x   | No        |
 
 ## Reporting a Vulnerability
 
@@ -92,7 +93,9 @@ location to substitute a malicious binary for `apt-get` or `dnf`.
 - Package manager binaries are called with **hardcoded absolute paths**:
   `/usr/bin/apt-get` and `/usr/bin/dnf`.
 - The caller's `PATH` is discarded (see §1).
-- mom verifies binary existence before forking.
+- `execve(2)` is called directly — if the binary does not exist, the child
+  exits with code 127. No pre-flight existence check is needed (which would
+  introduce a TOCTOU gap).
 
 #### 4. Configuration File Tampering
 
@@ -100,10 +103,10 @@ location to substitute a malicious binary for `apt-get` or `dnf`.
 group, redirect the deny list to an attacker-controlled file, or disable logging.
 
 **Mitigation:**
-- Before reading the config, mom verifies:
+- Before reading the config, mom verifies (using fstat on the already-opened fd):
   - File is owned by root (uid 0)
-  - File is not world-writable (mode `& 0o002 == 0`)
-- If either check fails, mom refuses to run and logs the violation.
+  - File is not group-writable or world-writable (mode `& 0o022 == 0`)
+- If any check fails, mom refuses to run and logs the violation.
 - Falls back to safe hardcoded defaults if the config file is absent.
 
 #### 5. Deny List Bypass
@@ -112,9 +115,9 @@ group, redirect the deny list to an attacker-controlled file, or disable logging
 restrictions, allowing installation of prohibited packages.
 
 **Mitigation:**
-- Before reading the deny list, mom verifies:
+- Before reading the deny list, mom verifies (using fstat on the already-opened fd):
   - File is owned by root or the `mom` group
-  - File is not world-writable
+  - File is not group-writable or world-writable
 - If the file is absent, an empty deny list is used (no denials) — this is
   a deliberate safe default.
 - The deny list path can be set to a read-only or immutable location by the
@@ -137,13 +140,16 @@ privileged resources. These groups are inherited by the setuid process.
 ownership check and its read, substituting a malicious version.
 
 **Mitigation:**
-- File metadata checks use `std::fs::metadata()` which internally opens
-  the file. Race windows are minimal.
+- All security-critical file validation uses the **open-then-fstat** pattern:
+  `File::open()` followed by `file.metadata()` (which calls `fstat(2)` on the
+  already-opened fd). The ownership/permissions check and the subsequent read
+  operate on the same inode — no TOCTOU window exists.
+- The `--check` diagnostic mode uses path-based `Path::exists()` and
+  `std::fs::metadata()` for its output. These are not security-critical since
+  `--check` makes no privilege decisions — it only prints diagnostic information
+  for sysadmins.
 - Config and deny list files should be placed on a local filesystem with
-  restricted permissions. Sysadmins should not place them on NFS or other
-  attacker-accessible shared storage.
-- Future hardening: use `openat()` + `fstat()` pattern to eliminate the
-  TOCTOU window entirely.
+  restricted permissions.
 
 #### 8. Concurrent Execution / Lock File Races
 
@@ -211,31 +217,49 @@ versa) to confuse the detection logic.
 | Kernel | setuid bit + group-restricted execute (4750) |
 | Runtime startup | Drop supplemental groups (`setgroups([])`) |
 | Input | Strict package name regex; no shell interpolation |
-| Configuration | Ownership + permission checks before read |
+| Configuration | Ownership + group/world-writable checks via fstat before read |
 | Execution | `execve` with hardcoded binary paths, clean environment |
 | Audit | JSON log + syslog for all operations (including denied) |
-| Packaging | Sysadmin sets permissions post-install (not automated) |
+| Packaging | Post-install scripts auto-configure group, setuid, and permissions |
+| Audit log | Opened with `O_NOFOLLOW`; symlinks rejected |
+| CI/CD | All third-party GitHub Actions pinned to commit SHAs |
 
 ---
 
 ### Known Limitations
 
-1. **TOCTOU on config/deny list files**: The ownership check and file read
-   are not atomic. On shared filesystems, a sufficiently privileged attacker
-   could race between them. Mitigation: use local filesystems and restrictive
-   permissions.
-
-2. **apt-get/dnf are trusted**: mom trusts the package manager binaries at
+1. **apt-get/dnf are trusted**: mom trusts the package manager binaries at
    their hardcoded paths. If those binaries are compromised, mom provides
    no additional protection.
 
-3. **No package signature verification**: mom does not independently verify
+2. **No package signature verification**: mom does not independently verify
    package signatures — it relies on apt/dnf to do so. Ensure your GPG
    keys and repository configuration are maintained by a trusted sysadmin.
 
-4. **Deny list is advisory**: The deny list prevents authorized users from
+3. **Deny list is advisory**: The deny list prevents authorized users from
    requesting specific packages via `mom`, but does not prevent a root user
    from installing them directly.
+
+4. **Proxy credentials in child environment**: If proxy URLs in `mom.conf`
+   contain embedded credentials (`http://user:pass@proxy:3128`), these are
+   passed as environment variables to the child `apt-get`/`dnf` process.
+   On Linux, `/proc/<pid>/environ` is readable by the process owner (root
+   only in this case). Sysadmins should prefer proxy configurations that
+   do not require credentials in the URL.
+
+5. **`mom refresh` bypasses group authorization**: Any user who can execute
+   the binary may run `mom refresh`, which triggers a privileged `apt-get
+   update` or `dnf makecache`. This is by design — refreshing repo metadata
+   is a read-only operation. When deployed with 4750 permissions (group-
+   restricted), the kernel prevents non-group members from executing the
+   binary. Under 4755 (open setuid), any local user can trigger this
+   privileged network operation.
+
+6. **Log file opened with O_NOFOLLOW**: The audit log is opened with
+   `O_NOFOLLOW` to prevent symlink-following attacks. If the log path is
+   a symlink, logging will fail (non-fatal). The post-install scripts create
+   the log file before setting the setuid bit, so the file always pre-exists
+   with correct ownership on properly installed systems.
 
 ---
 
@@ -270,4 +294,9 @@ tail -f /var/log/mom.log | jq .
 
 | Date | Change |
 |------|--------|
+| 2026-03-25 | F-01: Reject group-writable config/deny list files |
+| 2026-03-25 | F-02: Open log file with O_NOFOLLOW to prevent symlink attacks |
+| 2026-03-25 | F-03: Pin all GitHub Actions to commit SHAs |
+| 2026-03-25 | F-04: Remove TOCTOU pre-execve binary existence check |
+| 2026-03-25 | F-05/F-06/F-07: Clarify TOCTOU docs, proxy credentials, refresh auth |
 | 2026-03-25 | Initial security policy and threat model |

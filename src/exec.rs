@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{execve, fork, ForkResult};
@@ -69,11 +69,6 @@ fn run_pkg_cmd_silent(binary: &str, args: &[String], cfg: &Config) -> Result<i32
 }
 
 fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Result<i32> {
-    // Validate binary path exists before forking
-    if !std::path::Path::new(binary).exists() {
-        bail!("package manager binary not found: {binary}");
-    }
-
     let c_binary = CString::new(binary).context("binary path contains null byte")?;
 
     // Build argv: binary name first, then arguments
@@ -241,10 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn test_run_pkg_cmd_missing_binary_errors() {
+    fn test_run_pkg_cmd_missing_binary_exits_127() {
         let cfg = Config::default();
-        let result = run_pkg_cmd("/nonexistent/binary", &["--version".to_string()], &cfg);
-        assert!(result.is_err());
+        let rc = run_pkg_cmd("/nonexistent/binary", &["--version".to_string()], &cfg).unwrap();
+        assert_eq!(rc, 127);
     }
 
     #[test]

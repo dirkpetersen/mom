@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::io::Write;
+use std::os::unix::io::FromRawFd;
 use syslog::{Facility, Formatter3164};
 
 #[derive(Serialize, Clone)]
@@ -69,11 +70,24 @@ impl AuditLogger {
     }
 
     fn write_to_file(&self, json: &str) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-            .with_context(|| format!("cannot open log file {}", self.log_path))?;
+        // SECURITY: Use O_NOFOLLOW to prevent symlink-following attacks.
+        // A symlink at the log path could cause root to write to an
+        // attacker-chosen file. O_NOFOLLOW makes open() fail with ELOOP
+        // if the path is a symlink.
+        let c_path = std::ffi::CString::new(self.log_path.as_str())
+            .with_context(|| format!("log path contains null byte: {}", self.log_path))?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW,
+                0o640,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            anyhow::bail!("cannot open log file {}: {err}", self.log_path);
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
         writeln!(file, "{json}").with_context(|| format!("cannot write to {}", self.log_path))?;
         Ok(())
     }
