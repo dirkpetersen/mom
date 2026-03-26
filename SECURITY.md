@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.2.x   | Yes       |
-| 0.1.x   | No        |
+| 0.2.7+  | Yes       |
+| < 0.2.7 | No — upgrade to latest |
 
 ## Reporting a Vulnerability
 
@@ -103,19 +103,28 @@ location to substitute a malicious binary for `apt-get` or `dnf`.
 group, redirect the deny list to an attacker-controlled file, or disable logging.
 
 **Mitigation:**
-- Before reading the config, mom verifies (using fstat on the already-opened fd):
+- Config file is opened with `O_NOFOLLOW | O_CLOEXEC` — symlinks are rejected
+  with `ELOOP` (security error). This prevents an attacker from symlinking the
+  config to an attacker-controlled file.
+- After opening, mom verifies (using fstat on the already-opened fd):
   - File is owned by root (uid 0)
   - File is not group-writable or world-writable (mode `& 0o022 == 0`)
 - If any check fails, mom refuses to run and logs the violation.
 - Falls back to safe hardcoded defaults if the config file is absent.
+- Config values are validated: paths must be absolute with no null bytes;
+  group names must be ASCII alphanumeric (no Unicode); proxy URLs must be
+  http/https with no shell metacharacters or whitespace.
 
 #### 5. Deny List Bypass
 
 **Threat:** An attacker modifies or replaces the deny list file to remove
-restrictions, allowing installation of prohibited packages.
+restrictions, allowing installation of prohibited packages. On a shared
+filesystem, a mom-group member could symlink the deny list to a root-owned
+file with no valid patterns, bypassing all restrictions.
 
 **Mitigation:**
-- Before reading the deny list, mom verifies (using fstat on the already-opened fd):
+- Deny list is opened with `O_NOFOLLOW | O_CLOEXEC` — symlinks are rejected.
+- After opening, mom verifies (using fstat on the already-opened fd):
   - File is owned by root or the `mom` group
   - File is not group-writable or world-writable
 - If the file is absent, an empty deny list is used (no denials) — this is
@@ -134,16 +143,20 @@ privileged resources. These groups are inherited by the setuid process.
 - Group membership for authorization is re-checked from `/etc/group` after
   supplemental groups have been dropped.
 
-#### 7. TOCTOU (Time-of-Check-Time-of-Use) Races
+#### 7. TOCTOU (Time-of-Check-Time-of-Use) and Symlink Races
 
 **Threat:** An attacker replaces a config or deny list file between mom's
-ownership check and its read, substituting a malicious version.
+ownership check and its read, substituting a malicious version. Or an attacker
+places a symlink at the file path, pointing to a file that passes ownership
+checks (e.g., `/etc/hostname` is root-owned, world-readable).
 
 **Mitigation:**
-- All security-critical file validation uses the **open-then-fstat** pattern:
-  `File::open()` followed by `file.metadata()` (which calls `fstat(2)` on the
-  already-opened fd). The ownership/permissions check and the subsequent read
-  operate on the same inode — no TOCTOU window exists.
+- All security-critical files (config, deny list, audit log) are opened with
+  `O_NOFOLLOW`, which causes `open(2)` to fail with `ELOOP` if the path is a
+  symbolic link. This eliminates symlink-based attacks.
+- After opening with `O_NOFOLLOW`, file validation uses **fstat on the open fd**
+  (`file.metadata()` calls `fstat(2)`). The ownership/permissions check and the
+  subsequent read operate on the same inode — no TOCTOU window exists.
 - The `--check` diagnostic mode uses path-based `Path::exists()` and
   `std::fs::metadata()` for its output. These are not security-critical since
   `--check` makes no privilege decisions — it only prints diagnostic information
@@ -169,9 +182,14 @@ it mid-operation in a way that leaves the package manager in a bad state,
 or to influence control flow.
 
 **Mitigation:**
-- `SIGINT`, `SIGTERM`, and `SIGHUP` are caught in the parent and forwarded
-  to the child package manager process. The package manager handles them
-  with its own cleanup logic.
+- `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` are caught in the parent
+  and forwarded to the child package manager process. The package manager
+  handles them with its own cleanup logic.
+- Signal handlers use `SA_RESTART` to prevent `waitpid()` from returning
+  `EINTR` (which could orphan the child). The `waitpid` loop also explicitly
+  retries on `EINTR` for belt-and-suspenders safety.
+- Signals are blocked between `fork()` and `CHILD_PID.store()` to prevent
+  a race where the handler fires before the parent knows the child's PID.
 - Only async-signal-safe operations are performed in the signal handler
   (`kill(2)` and an atomic load).
 
@@ -179,13 +197,20 @@ or to influence control flow.
 
 **Threat:** An attacker crafts a package name containing newlines, JSON
 control characters, or other sequences to inject false entries into the
-audit log.
+audit log or syslog.
 
 **Mitigation:**
-- Log entries are serialized as JSON using `serde_json`, which escapes all
+- JSON audit log entries are serialized via `serde_json`, which escapes all
   special characters including `\n`, `\r`, `"`, `\`, and control characters.
+- Syslog messages have all fields passed through `sanitize_for_syslog()`,
+  which replaces control characters with underscores. This covers
+  `real_user`, `operation`, `packages`, `outcome`, and `detail` fields —
+  preventing injection via crafted NSS/LDAP usernames or future code paths.
 - Package names have already been validated against the strict regex before
   they reach the logger.
+- The audit log file is opened with `O_NOFOLLOW` to prevent symlink attacks
+  and `fchmod(fd, 0o640)` is called after creation to set correct permissions
+  regardless of the startup umask.
 
 #### 11. Unauthorized Package Installation (Group Restriction Bypass)
 
@@ -215,14 +240,20 @@ versa) to confuse the detection logic.
 | Layer | Mechanism |
 |-------|-----------|
 | Kernel | setuid bit + group-restricted execute (4750) |
-| Runtime startup | Drop supplemental groups (`setgroups([])`) |
-| Input | Strict package name regex; no shell interpolation |
-| Configuration | Ownership + group/world-writable checks via fstat before read |
-| Execution | `execve` with hardcoded binary paths, clean environment |
-| Audit | JSON log + syslog for all operations (including denied) |
-| Packaging | Post-install scripts auto-configure group, setuid, and permissions |
-| Audit log | Opened with `O_NOFOLLOW`; symlinks rejected |
-| CI/CD | All third-party GitHub Actions pinned to commit SHAs |
+| Runtime startup | `umask(0o077)`; drop supplemental groups (`setgroups([])`) |
+| Input | Strict package name regex `^[a-zA-Z0-9][a-zA-Z0-9.+\-]*$`; max 256 chars; max 100 packages |
+| File opens | `O_NOFOLLOW \| O_CLOEXEC` on all security-critical files (config, deny list, audit log) |
+| File validation | `fstat` on open fd: ownership + group/world-writable bit checks |
+| Config validation | Paths must be absolute; group names ASCII-only; proxy URLs scheme-checked and metachar-free |
+| Execution | `execve` with hardcoded binary paths; clean environment (only PATH, HOME, LANG, proxy) |
+| Signal handling | `SA_RESTART` + `EINTR` retry; signals blocked across `fork`/PID-store; SIGINT/SIGTERM/SIGHUP/SIGQUIT forwarded |
+| Pipe hygiene | `pipe2(O_CLOEXEC)`; bounded reads (64 bytes); fd cleanup on fork failure |
+| Audit (file) | JSON via `serde_json`; `O_NOFOLLOW`; `fchmod(0o640)` after create; logrotate with `root:mom` ownership |
+| Audit (syslog) | All fields passed through `sanitize_for_syslog()` (control char replacement) |
+| Package state | Apt: `dpkg-query -W -f='${db:Status-Abbrev}'` to distinguish installed (`ii`) from config-files (`rc`) |
+| Packaging | Post-install scripts auto-configure group, setuid, permissions, log file |
+| CI/CD | All GitHub Actions pinned to commit SHAs; `cargo audit` gates every release; `--locked` on all builds |
+| Release integrity | SHA256SUMS file published with every release |
 
 ---
 
@@ -255,11 +286,27 @@ versa) to confuse the detection logic.
    binary. Under 4755 (open setuid), any local user can trigger this
    privileged network operation.
 
-6. **Log file opened with O_NOFOLLOW**: The audit log is opened with
-   `O_NOFOLLOW` to prevent symlink-following attacks. If the log path is
-   a symlink, logging will fail (non-fatal). The post-install scripts create
-   the log file before setting the setuid bit, so the file always pre-exists
-   with correct ownership on properly installed systems.
+6. **All security-critical files opened with O_NOFOLLOW**: The config,
+   deny list, and audit log are all opened with `O_NOFOLLOW`. If any path
+   is a symlink, the operation fails (security error for config/deny list;
+   non-fatal for log). The post-install scripts create files before setting
+   the setuid bit, so they always pre-exist on properly installed systems.
+
+7. **No rate limiting on failed auth**: Repeated denied attempts are logged
+   but not rate-limited. On systems with high attacker activity, this could
+   grow the audit log rapidly. Sysadmins can use logrotate `maxsize` or
+   external tools like `fail2ban` to mitigate.
+
+8. **No Linux capabilities dropping**: After `setgroups([])`, mom retains
+   the full capability set from effective UID 0. Dropping unused capabilities
+   via `prctl(PR_SET_SECUREBITS)` or `capset` would reduce impact of any
+   future memory safety vulnerability. This is a defense-in-depth
+   recommendation; no exploitable vulnerability exists that would require it.
+
+9. **`--check` uses path-based stat**: The `--check` diagnostic mode uses
+   `std::fs::metadata()` (path-based, follows symlinks) for binary
+   permission reporting. This is not security-critical since `--check`
+   makes no authorization decisions.
 
 ---
 
@@ -292,11 +339,13 @@ tail -f /var/log/mom.log | jq .
 
 ### Changelog
 
-| Date | Change |
-|------|--------|
-| 2026-03-25 | F-01: Reject group-writable config/deny list files |
-| 2026-03-25 | F-02: Open log file with O_NOFOLLOW to prevent symlink attacks |
-| 2026-03-25 | F-03: Pin all GitHub Actions to commit SHAs |
-| 2026-03-25 | F-04: Remove TOCTOU pre-execve binary existence check |
-| 2026-03-25 | F-05/F-06/F-07: Clarify TOCTOU docs, proxy credentials, refresh auth |
-| 2026-03-25 | Initial security policy and threat model |
+| Version | Date | Changes |
+|---------|------|---------|
+| v0.2.7 | 2026-03-25 | **Open config and deny list with `O_NOFOLLOW`** to prevent symlink bypass on shared filesystems. Sync inline logrotate configs with repo source. Sanitize all syslog message fields. |
+| v0.2.6 | 2026-03-25 | **Harden pipe handling**: `pipe2(O_CLOEXEC)` to prevent fd leakage; bounded 64-byte read in `run_capture`; fd cleanup on fork failure. Fix logrotate to create rotated logs as `root:mom`. Consolidate `is_installed` into single `dpkg-query` execution. |
+| v0.2.5 | 2026-03-25 | **Fix `dpkg-query` config-files state**: parse `${db:Status-Abbrev}` output to distinguish `ii` (installed) from `rc` (config-files). Add SHA256SUMS to release artifacts. Restrict group name validation to ASCII. |
+| v0.2.4 | 2026-03-25 | **Sanitize package names in syslog**. Add `fchmod(fd, 0o640)` to log file creation (umask fix). Forward SIGQUIT to child. Add `--locked` to all CI/release builds. Add `cargo audit` gate in release workflow. Reject whitespace in proxy URLs. |
+| v0.2.3 | 2026-03-25 | **Handle `EINTR` in waitpid loop** with explicit retry + `SA_RESTART`. Validate release tag format (semver regex). Sanitize syslog `real_user` and `detail` fields. Validate config paths as absolute. Warn on 4755 permissions in `--check`. Fix RPM `%files` for man page/completions. Fix bash completion quoting. |
+| v0.2.2 | 2026-03-25 | **Reject group-writable files** in `validate_file_metadata` (`0o022` check). Open audit log with `O_NOFOLLOW`. Pin all GitHub Actions to commit SHAs. Remove TOCTOU pre-execve binary existence check. Document proxy credential exposure, refresh auth bypass, fstat vs path-based stat distinction. |
+| v0.2.0 | 2026-03-25 | Post-install scripts auto-configure group, setuid, permissions. |
+| v0.1.0 | 2026-03-25 | Initial release with security policy and threat model. |
