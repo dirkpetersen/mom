@@ -1,5 +1,7 @@
 use anyhow::Result;
+use std::fs::File;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::FromRawFd;
 
 use crate::auth;
 use crate::config::{Config, CONFIG_PATH};
@@ -131,10 +133,32 @@ fn check_binary_permissions(errors: &mut usize, warnings: &mut usize) {
         }
     };
 
-    let meta = match std::fs::metadata(&exe) {
+    // Use O_NOFOLLOW + fstat to avoid symlink-following TOCTOU
+    let c_path = match std::ffi::CString::new(exe.to_string_lossy().as_bytes().to_vec()) {
+        Ok(c) => c,
+        Err(_) => {
+            warn("binary path contains null byte");
+            *warnings += 1;
+            return;
+        }
+    };
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        warn(&format!("could not open binary {}: {e}", exe.display()));
+        *warnings += 1;
+        return;
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let meta = match file.metadata() {
         Ok(m) => m,
         Err(e) => {
-            warn(&format!("could not stat binary {}: {e}", exe.display()));
+            warn(&format!("could not fstat binary {}: {e}", exe.display()));
             *warnings += 1;
             return;
         }

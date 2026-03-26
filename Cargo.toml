@@ -1,6 +1,6 @@
 [package]
 name = "mom"
-version = "0.2.10"
+version = "0.2.11"
 edition = "2021"
 description = "Meta Overlay Manager — allow non-root users to install packages"
 license = "MIT"

@@ -227,6 +227,13 @@ fn validate_proxy_url(value: &str, key: &str) -> Result<String> {
             bail!("security error: {key} contains forbidden character {ch:?}");
         }
     }
+    // Warn if URL contains embedded credentials (user:pass@host)
+    if value.contains('@') {
+        eprintln!(
+            "mom: warning: {key} appears to contain embedded credentials — \
+             these will be visible in the child process environment (/proc/<pid>/environ)"
+        );
+    }
     Ok(value.to_string())
 }
 
