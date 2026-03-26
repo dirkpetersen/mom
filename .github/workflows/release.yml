@@ -149,6 +149,10 @@ jobs:
               missingok
               notifempty
               create 0640 root mom
+              sharedscripts
+              postrotate
+                  logger -t mom "audit log rotated"
+              endscript
           }
           LOGROTATE
 
@@ -312,6 +316,10 @@ jobs:
               missingok
               notifempty
               create 0640 root mom
+              sharedscripts
+              postrotate
+                  logger -t mom "audit log rotated"
+              endscript
           }
           LOGROTATE
 

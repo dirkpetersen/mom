@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use crate::config::{validate_file_metadata, FileOwnership};
+use crate::config::{open_nofollow, validate_file_metadata, FileOwnership, OpenNoFollowError};
 
 /// A compiled deny list loaded from the configured deny_list path.
 pub struct DenyList {
@@ -19,18 +18,26 @@ impl DenyList {
     /// Validates ownership using open-then-fstat to avoid TOCTOU.
     /// `group_gid` is the resolved GID of the configured group (for ownership check).
     pub fn load(path: &str, group_gid: Option<u32>) -> Result<Self> {
-        let file = match File::open(path) {
+        // SECURITY: Open with O_NOFOLLOW to reject symlinks. On shared filesystems,
+        // a mom-group member could replace the deny list with a symlink to a root-owned
+        // file containing no valid patterns, effectively bypassing all denials.
+        let file = match open_nofollow(path) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(OpenNoFollowError::NotFound) => {
                 return Ok(DenyList {
                     globset: GlobSet::empty(),
                     patterns: vec![],
                 });
             }
-            Err(e) => return Err(e).with_context(|| format!("cannot open deny list {path}")),
+            Err(OpenNoFollowError::IsSymlink) => {
+                bail!("security error: deny list {path} is a symlink — refusing to read")
+            }
+            Err(OpenNoFollowError::Other(e)) => {
+                return Err(e).with_context(|| format!("cannot open deny list {path}"))
+            }
         };
 
-        // SECURITY: validate using fstat on the already-opened fd to prevent TOCTOU.
+        // Validate using fstat on the already-opened fd to prevent TOCTOU.
         // Deny list must be owned by root or the mom group.
         let ownership = match group_gid {
             Some(gid) => FileOwnership::RootOrGroup(gid),

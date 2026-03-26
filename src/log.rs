@@ -115,14 +115,14 @@ impl AuditLogger {
             "user={} uid={} op={} packages=[{}] outcome={} detail={}",
             Self::sanitize_for_syslog(&entry.real_user),
             entry.real_uid,
-            entry.operation,
+            Self::sanitize_for_syslog(&entry.operation),
             entry
                 .packages
                 .iter()
                 .map(|p| Self::sanitize_for_syslog(p))
                 .collect::<Vec<_>>()
                 .join(","),
-            entry.outcome,
+            Self::sanitize_for_syslog(&entry.outcome),
             Self::sanitize_for_syslog(entry.detail.as_deref().unwrap_or("-")),
         );
         if let Ok(mut writer) = syslog::unix(formatter) {

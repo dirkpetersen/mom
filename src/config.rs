@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::FromRawFd;
 
 pub const DEFAULT_GROUP: &str = "mom";
 pub const DEFAULT_DENY_LIST: &str = "/etc/mom/deny.list";
@@ -35,11 +36,18 @@ impl Config {
     /// Falls back to safe defaults if the file does not exist.
     /// Validates ownership and permissions using open-then-fstat to avoid TOCTOU.
     pub fn load() -> Result<Self> {
-        // Attempt to open; if it doesn't exist, fall back to defaults
-        let file = match File::open(CONFIG_PATH) {
+        // SECURITY: Open with O_NOFOLLOW to reject symlinks. A symlink at the
+        // config path could redirect to an attacker-controlled file that passes
+        // ownership checks (e.g. any root-owned readable file).
+        let file = match open_nofollow(CONFIG_PATH) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
-            Err(e) => return Err(e).with_context(|| format!("cannot open {CONFIG_PATH}")),
+            Err(OpenNoFollowError::NotFound) => return Ok(Config::default()),
+            Err(OpenNoFollowError::IsSymlink) => {
+                bail!("security error: {CONFIG_PATH} is a symlink — refusing to read")
+            }
+            Err(OpenNoFollowError::Other(e)) => {
+                return Err(e).with_context(|| format!("cannot open {CONFIG_PATH}"))
+            }
         };
 
         // SECURITY: validate using fstat on the already-opened fd to prevent TOCTOU
@@ -102,18 +110,50 @@ pub enum FileOwnership {
     RootOrGroup(u32),
 }
 
+/// Error type for open_nofollow, distinguishing ENOENT, ELOOP, and other errors.
+pub enum OpenNoFollowError {
+    NotFound,
+    IsSymlink,
+    Other(std::io::Error),
+}
+
+/// Open a file with O_RDONLY | O_NOFOLLOW | O_CLOEXEC.
+/// Returns ELOOP as IsSymlink if the path is a symbolic link.
+pub fn open_nofollow(path: &str) -> std::result::Result<File, OpenNoFollowError> {
+    let c_path = match std::ffi::CString::new(path) {
+        Ok(c) => c,
+        Err(e) => return Err(OpenNoFollowError::Other(std::io::Error::other(e))),
+    };
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Err(OpenNoFollowError::NotFound),
+            Some(libc::ELOOP) => Err(OpenNoFollowError::IsSymlink),
+            _ => Err(OpenNoFollowError::Other(err)),
+        };
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 /// Validate an already-opened file using fstat (no TOCTOU).
+/// The file must have been opened with O_NOFOLLOW to prevent symlink traversal.
 /// Checks:
 /// - ownership (root or root-or-group depending on `ownership`)
 /// - not world-writable
 /// - not group-writable (security-sensitive files must not be writable by group members)
-/// - not a symlink (file type check via fstat)
+/// - is a regular file (not a directory, device, etc.)
 pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership) -> Result<()> {
     let meta = file
         .metadata()
         .with_context(|| format!("cannot fstat {path}"))?;
 
-    // Reject if not a regular file (could be symlink target, but we check type after open)
+    // Reject if not a regular file
     if !meta.is_file() {
         bail!("security error: {path} is not a regular file");
     }
