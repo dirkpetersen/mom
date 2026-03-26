@@ -5,7 +5,7 @@
     delaycompress
     missingok
     notifempty
-    create 0640 root root
+    create 0640 root mom
     sharedscripts
     postrotate
         # Notify syslog that log has been rotated

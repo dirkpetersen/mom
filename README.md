@@ -43,19 +43,19 @@ Install from [GitHub Releases](https://github.com/dirkpetersen/mom/releases) —
 
 ```bash
 # Pick the right .deb for your distro:
-wget https://github.com/dirkpetersen/mom/releases/latest/download/mom_0.2.5_ubuntu-2404_amd64.deb
-sudo dpkg -i mom_0.2.5_ubuntu-2404_amd64.deb
+wget https://github.com/dirkpetersen/mom/releases/latest/download/mom_0.2.6_ubuntu-2404_amd64.deb
+sudo dpkg -i mom_0.2.6_ubuntu-2404_amd64.deb
 ```
 
-Available packages: `mom_0.2.5_debian-latest_amd64.deb`, `mom_0.2.5_ubuntu-2204_amd64.deb`, `mom_0.2.5_ubuntu-2404_amd64.deb`, `mom_0.2.5_ubuntu-2604_amd64.deb`
+Available packages: `mom_0.2.6_debian-latest_amd64.deb`, `mom_0.2.6_ubuntu-2204_amd64.deb`, `mom_0.2.6_ubuntu-2404_amd64.deb`, `mom_0.2.6_ubuntu-2604_amd64.deb`
 
 ### RHEL / Rocky / Alma
 
 ```bash
-sudo dnf install https://github.com/dirkpetersen/mom/releases/latest/download/mom-0.2.5.el9.x86_64.rpm
+sudo dnf install https://github.com/dirkpetersen/mom/releases/latest/download/mom-0.2.6.el9.x86_64.rpm
 ```
 
-Available packages: `mom-0.2.5.el9.x86_64.rpm`, `mom-0.2.5.el10.x86_64.rpm`
+Available packages: `mom-0.2.6.el9.x86_64.rpm`, `mom-0.2.6.el10.x86_64.rpm`
 
 ### After Install
 
@@ -197,8 +197,8 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ## Releasing
 
 ```bash
-git tag v0.2.5
-git push origin v0.2.5
+git tag v0.2.6
+git push origin v0.2.6
 ```
 
 The release workflow builds `.deb` and `.rpm` packages for all supported

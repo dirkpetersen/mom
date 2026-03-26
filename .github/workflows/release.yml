@@ -148,7 +148,7 @@ jobs:
               delaycompress
               missingok
               notifempty
-              create 0640 root root
+              create 0640 root mom
           }
           LOGROTATE
 
@@ -311,7 +311,7 @@ jobs:
               delaycompress
               missingok
               notifempty
-              create 0640 root root
+              create 0640 root mom
           }
           LOGROTATE
 
