@@ -91,12 +91,12 @@ impl Config {
             log_file,
             http_proxy: map
                 .get("http_proxy")
-                .cloned()
-                .and_then(|v| validate_proxy_url(&v, "http_proxy").ok()),
+                .map(|v| validate_proxy_url(v, "http_proxy"))
+                .transpose()?,
             https_proxy: map
                 .get("https_proxy")
-                .cloned()
-                .and_then(|v| validate_proxy_url(&v, "https_proxy").ok()),
+                .map(|v| validate_proxy_url(v, "https_proxy"))
+                .transpose()?,
         };
         Ok(cfg)
     }
