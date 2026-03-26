@@ -36,7 +36,7 @@ Released as downloadable artifacts from GitHub Releases. Two forms:
 ```
 mom install <pkg> [pkg...]    # install one or more packages
 mom update <pkg> [pkg...]     # refresh repos, then update named packages (errors if not installed)
-mom refresh                   # refresh repo metadata only (no auth check — any user)
+mom refresh                   # refresh repo metadata only (requires group membership)
 mom --version
 mom --help
 mom --check                   # validate config and deny list, no package operations (sysadmin use)
@@ -61,7 +61,7 @@ Two deployment modes, both use a **setuid-root binary**:
 
 In group-restricted mode, only members of the `mom` group (or the group named in `mom.conf`) can execute the binary. In both cases the binary runs as root. Detection at runtime: effective UID = 0 confirms privilege was granted; real UID identifies the calling user.
 
-`mom refresh` bypasses group authorization — any user may invoke it, but it still runs through the setuid privilege path to gain root for `apt-get update` / `dnf makecache`.
+`mom refresh` requires group membership, like all other subcommands. It runs through the setuid privilege path to gain root for `apt-get update` / `dnf makecache`.
 
 The sysadmin sets the binary permissions manually post-install. Document `chmod 4750 /usr/bin/mom && chown root:mom /usr/bin/mom` in the man page.
 

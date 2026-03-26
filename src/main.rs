@@ -119,6 +119,8 @@ fn run() -> Result<()> {
 
     // ── --check overrides all subcommands ────────────────────────────────────
     if cli.check {
+        // Require group membership (or root) to prevent config path leakage
+        require_group_membership(real_uid, real_gid, &cfg, &logger, &real_user, "check", &[])?;
         return check::run_check(&cfg);
     }
 
@@ -132,7 +134,17 @@ fn run() -> Result<()> {
         }
 
         Some(Commands::Refresh) => {
-            // Any user may refresh — no group check
+            // Group membership required — prevents unauthenticated users from
+            // triggering privileged network operations under 4755 (open setuid).
+            require_group_membership(
+                real_uid,
+                real_gid,
+                &cfg,
+                &logger,
+                &real_user,
+                "refresh",
+                &[],
+            )?;
             let pm = detect::detect_package_manager()?;
             logger.log(log::Entry::new(
                 real_uid.as_raw(),

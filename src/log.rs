@@ -90,17 +90,31 @@ impl AuditLogger {
         // SECURITY: fchmod after open to set correct mode regardless of umask.
         // The startup umask(0o077) would strip group-read from 0o640, making
         // the log unreadable by ops groups. fchmod bypasses the umask.
-        unsafe { libc::fchmod(fd, 0o640) };
+        if unsafe { libc::fchmod(fd, 0o640) } != 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!(
+                "mom: warning: fchmod on log file {} failed: {err}",
+                self.log_path
+            );
+        }
         let mut file = unsafe { File::from_raw_fd(fd) };
         writeln!(file, "{json}").with_context(|| format!("cannot write to {}", self.log_path))?;
         Ok(())
     }
 
-    /// Replace control characters (newlines, tabs, etc.) with underscores
-    /// to prevent syslog injection via crafted usernames from NSS/LDAP.
+    /// Sanitize a string for safe syslog inclusion.
+    /// Replaces control characters, `%` (format string risk in some syslog
+    /// implementations), and non-ASCII (LDAP/SSSD usernames that could
+    /// corrupt log encoding) with underscores.
     fn sanitize_for_syslog(s: &str) -> String {
         s.chars()
-            .map(|c| if c.is_control() { '_' } else { c })
+            .map(|c| {
+                if c.is_control() || c == '%' || !c.is_ascii() {
+                    '_'
+                } else {
+                    c
+                }
+            })
             .collect()
     }
 

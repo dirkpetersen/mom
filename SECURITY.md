@@ -278,13 +278,10 @@ versa) to confuse the detection logic.
    only in this case). Sysadmins should prefer proxy configurations that
    do not require credentials in the URL.
 
-5. **`mom refresh` bypasses group authorization**: Any user who can execute
-   the binary may run `mom refresh`, which triggers a privileged `apt-get
-   update` or `dnf makecache`. This is by design — refreshing repo metadata
-   is a read-only operation. When deployed with 4750 permissions (group-
-   restricted), the kernel prevents non-group members from executing the
-   binary. Under 4755 (open setuid), any local user can trigger this
-   privileged network operation.
+5. **`mom refresh` requires group membership** (since v0.2.8): All
+   subcommands, including `refresh`, now require the caller to be a member
+   of the configured `mom` group. This prevents unauthenticated users from
+   triggering privileged network operations under 4755 (open setuid) mode.
 
 6. **All security-critical files opened with O_NOFOLLOW**: The config,
    deny list, and audit log are all opened with `O_NOFOLLOW`. If any path

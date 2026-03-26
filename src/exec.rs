@@ -186,8 +186,10 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
             let _ = block_set.thread_unblock();
 
             // Redirect stdout/stderr to /dev/null if silent
-            if silent {
-                redirect_to_devnull();
+            if silent && !redirect_to_devnull() {
+                // Cannot safely proceed with inherited stdout/stderr in a
+                // setuid context — abort the child.
+                unsafe { libc::_exit(126) };
             }
             // exec replaces the child process — no return on success
             let _ = execve(&c_binary, &c_args, &c_env);
@@ -265,14 +267,17 @@ fn build_env(cfg: &Config) -> Vec<String> {
     env
 }
 
-fn redirect_to_devnull() {
+/// Redirect stdout and stderr to /dev/null. Returns false on failure.
+fn redirect_to_devnull() -> bool {
     unsafe {
         let fd = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-        if fd >= 0 {
-            libc::dup2(fd, libc::STDOUT_FILENO);
-            libc::dup2(fd, libc::STDERR_FILENO);
-            libc::close(fd);
+        if fd < 0 {
+            return false;
         }
+        let ok =
+            libc::dup2(fd, libc::STDOUT_FILENO) >= 0 && libc::dup2(fd, libc::STDERR_FILENO) >= 0;
+        libc::close(fd);
+        ok
     }
 }
 

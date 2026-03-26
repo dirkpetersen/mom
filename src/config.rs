@@ -173,11 +173,20 @@ pub fn validate_file_metadata(file: &File, path: &str, ownership: FileOwnership)
             }
         }
         FileOwnership::RootOrGroup(gid) => {
-            if meta.uid() != 0 && meta.gid() != gid {
+            // File must be owned by root (uid 0). The group may be root or
+            // the configured mom group. We no longer accept files owned by
+            // a non-root mom-group member, because on shared filesystems
+            // that member could delete and recreate the file.
+            if meta.uid() != 0 {
                 bail!(
-                    "security error: {path} must be owned by root or gid {gid} \
-                     (found uid={} gid={})",
-                    meta.uid(),
+                    "security error: {path} must be owned by root (uid 0), found uid {}",
+                    meta.uid()
+                );
+            }
+            if meta.gid() != 0 && meta.gid() != gid {
+                bail!(
+                    "security error: {path} must have group root or gid {gid} \
+                     (found gid={})",
                     meta.gid()
                 );
             }
@@ -204,10 +213,14 @@ fn validate_proxy_url(value: &str, key: &str) -> Result<String> {
     if !value.starts_with("http://") && !value.starts_with("https://") {
         bail!("security error: {key} must start with http:// or https://, got: {value:?}");
     }
-    // Reject any shell-dangerous characters
+    // Reject any non-printable or non-ASCII characters, plus shell metacharacters
+    for ch in value.chars() {
+        if !ch.is_ascii() || ch.is_ascii_control() {
+            bail!("security error: {key} contains non-printable or non-ASCII character {ch:?}");
+        }
+    }
     let forbidden = [
-        ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '\n', '\r', '\0',
-        ' ', '\t',
+        ';', '|', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', ' ', '\t',
     ];
     for ch in forbidden {
         if value.contains(ch) {

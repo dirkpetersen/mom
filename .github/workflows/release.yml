@@ -375,7 +375,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: [build-binaries, build-deb, build-rpm]
-    if: always() && needs.build-binaries.result == 'success'
+    if: needs.build-binaries.result == 'success' && needs.build-deb.result == 'success' && needs.build-rpm.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
