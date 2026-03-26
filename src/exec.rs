@@ -114,15 +114,18 @@ fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, St
         Ok(ForkResult::Child) => {
             unsafe {
                 libc::close(pipe_read);
-                // Clear O_CLOEXEC on write end, then dup to stdout
-                libc::dup2(pipe_write, libc::STDOUT_FILENO);
+                // dup pipe write end to stdout; abort child on failure to
+                // prevent dpkg-query output leaking to the terminal
+                if libc::dup2(pipe_write, libc::STDOUT_FILENO) < 0 {
+                    libc::_exit(126);
+                }
                 libc::close(pipe_write);
                 // Stderr to /dev/null
                 let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-                if devnull >= 0 {
-                    libc::dup2(devnull, libc::STDERR_FILENO);
-                    libc::close(devnull);
+                if devnull < 0 || libc::dup2(devnull, libc::STDERR_FILENO) < 0 {
+                    libc::_exit(126);
                 }
+                libc::close(devnull);
             }
             let _ = execve(&c_binary, &c_args, &c_env);
             unsafe { libc::_exit(127) };

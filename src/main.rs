@@ -77,11 +77,10 @@ fn main() {
 }
 
 /// Remove all environment variables from the current process.
+/// Uses libc::clearenv() to ensure non-UTF-8 keys are also removed
+/// (std::env::vars() silently skips them).
 fn clear_environment() {
-    let keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
-    for key in keys {
-        unsafe { std::env::remove_var(&key) };
-    }
+    unsafe { libc::clearenv() };
 }
 
 fn run() -> Result<()> {
