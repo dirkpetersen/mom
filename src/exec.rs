@@ -113,6 +113,7 @@ fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, St
         }
         Ok(ForkResult::Child) => {
             unsafe {
+                libc::umask(0o022);
                 libc::close(pipe_read);
                 // dup pipe write end to stdout; abort child on failure to
                 // prevent dpkg-query output leaking to the terminal
@@ -187,6 +188,12 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
         ForkResult::Child => {
             // Unblock signals in child
             let _ = block_set.thread_unblock();
+
+            // SECURITY: Reset umask to 0o022 before exec. The parent's
+            // umask(0o077) is inherited across fork; if left in place,
+            // apt-get creates /var/cache/apt/archives/partial/ as mode 700,
+            // blocking the _apt user that apt uses for downloading packages.
+            unsafe { libc::umask(0o022) };
 
             // Redirect stdout/stderr to /dev/null if silent
             if silent && !redirect_to_devnull() {
