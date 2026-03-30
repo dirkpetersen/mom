@@ -113,6 +113,7 @@ fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, St
         }
         Ok(ForkResult::Child) => {
             unsafe {
+                libc::setresuid(0, 0, 0);
                 libc::umask(0o022);
                 libc::close(pipe_read);
                 // dup pipe write end to stdout; abort child on failure to
@@ -188,6 +189,14 @@ fn run_execve(binary: &str, args: &[String], env: &[String], silent: bool) -> Re
         ForkResult::Child => {
             // Unblock signals in child
             let _ = block_set.thread_unblock();
+
+            // Set all UIDs to root before exec. In a setuid context, the real
+            // UID is the calling user (non-root). Modern apt-get/dpkg detect
+            // ruid != euid and refuse privileged operations (dpkg returns
+            // "requested operation requires superuser privilege"). All
+            // authorization checks have already passed in the parent, so
+            // presenting a clean root identity to the package manager is safe.
+            unsafe { libc::setresuid(0, 0, 0) };
 
             // SECURITY: Reset umask to 0o022 before exec. The parent's
             // umask(0o077) is inherited across fork; if left in place,

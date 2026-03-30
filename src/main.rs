@@ -104,14 +104,6 @@ fn run() -> Result<()> {
     // ── Drop supplemental groups immediately ─────────────────────────────────
     auth::drop_supplemental_groups()?;
 
-    // ── Drop unnecessary Linux capabilities for defense-in-depth ────────────
-    // We only need: file access, process management (fork/exec/wait), and
-    // chown/chmod (handled by euid=0). PR_SET_NO_NEW_PRIVS prevents the
-    // child from gaining additional privileges via setuid/capabilities.
-    unsafe {
-        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    }
-
     // ── Resolve caller identity for logging ──────────────────────────────────
     let real_user = auth::username_for_uid(real_uid)?;
 
