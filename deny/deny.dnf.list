@@ -1,0 +1,21 @@
+# RHEL / Rocky / Alma specific package names
+# Merged with deny.list at install time.
+
+# ettercap is a single package on RHEL
+ettercap
+
+# wireshark CLI is a separate package on RHEL
+wireshark-cli
+
+# impacket Python package name
+python3-impacket
+
+# Dante proxy single package
+dante
+
+# Legacy protocol server names
+telnet-server vsftpd finger-server talk-server
+rsh
+
+# ncat ships separately from nmap on RHEL
+nmap-ncat

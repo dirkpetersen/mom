@@ -1,0 +1,69 @@
+# /etc/mom/deny.list — packages denied to non-root users
+# One or more package names / glob patterns per line, separated by spaces.
+# Blank lines and lines beginning with # are ignored.
+# Glob wildcards * and ? are supported (e.g. python3-* matches python3-dev).
+#
+# This file is generated at install time by merging deny/deny.list (generic)
+# with deny/deny.apt.list or deny/deny.dnf.list (OS-specific).
+
+# Exploitation & Attack Frameworks
+metasploit-framework setoolkit beef-xss exploitdb armitage
+veil veil-evasion veil-catapult empire powersploit
+covenant sliver havoc cobalt-strike pwncat
+impacket crackmapexec evil-winrm
+
+# Password Crackers
+john hashcat hydra medusa ncrack patator
+ophcrack crunch rainbowcrack rsmangler
+fcrackzip pdfcrack pipal
+
+# Network Attack / MITM Tools
+bettercap arpspoof dsniff mitmproxy responder
+sslstrip yersinia hping3 hping hping2
+tcpreplay nemesis packeth sendip fragroute fragrouter
+
+# Wireless Attack Tools
+aircrack-ng airodump-ng aireplay-ng airmon-ng
+wifite reaver bully pixiewps mdk3 mdk4
+cowpatty fern-wifi-cracker kismet
+hostapd-wpe wifi-honey eaphammer
+
+# Web Application Attack Tools
+sqlmap nikto skipfish w3af w3af-console
+wfuzz gobuster dirbuster dirb ffuf feroxbuster
+commix xsser wpscan joomscan droopescan
+dalfox nuclei subfinder amass httprobe
+
+# Packet Sniffers & Network Scanners
+wireshark tcpdump nmap masscan zmap
+p0f xprobe2 unicornscan netsniff-ng
+driftnet urlsnarf webspy msgsnarf filesnarf
+ssldump sslsniff tcpflow tcpick tcpxtract chaosreader
+
+# Keyloggers & Input Capture
+logkeys keylogger xspy xkeylogger
+
+# Insecure Legacy Protocols
+telnet ftp finger talk
+rlogin rexec
+
+# DNS / ICMP Tunneling & Evasion Tools
+iodine iodine-client iodine-server dns2tcp nstx
+ptunnel ptunnel-ng icmptunnel hans proxytunnel
+3proxy redsocks torsocks tor obfs4proxy meek-client
+
+# Rootkit Detection (block to prevent adversarial use)
+chkrootkit rkhunter unhide
+
+# Vulnerability Scanners
+openvas openvas-scanner openvas-manager
+gvm gvm-tools lynis nessus
+
+# Forensics / Data Extraction
+binwalk foremost scalpel safecopy
+dc3dd dcfldd autopsy volatility volatility3
+bulk-extractor photorec
+
+# Cryptocurrency Miners
+xmrig cpuminer cpuminer-multi
+bfgminer cgminer minerd ethminer

@@ -1,0 +1,25 @@
+# Debian / Ubuntu specific package names
+# Merged with deny.list at install time.
+
+# ettercap ships as split packages on Debian
+ettercap-common ettercap-graphical ettercap-text-only
+
+# wireshark extras
+wireshark-common tshark
+
+# Password cracker data/utils split packages
+john-data hashcat-utils thc-hydra
+
+# impacket scripts split package
+impacket-scripts
+
+# Dante proxy split packages
+dante-client dante-server
+
+# Legacy protocol server/client names
+telnetd telnet-ssl ntalk
+ftpd fingerd talkd
+rsh-client rsh-server rsh-redone-client rsh-redone-server
+
+# netcat variants
+netcat-traditional netcat-openbsd

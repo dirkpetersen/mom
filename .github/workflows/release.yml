@@ -121,8 +121,13 @@ jobs:
           mkdir -p "${PKG_ROOT}/usr/bin"
           mkdir -p "${PKG_ROOT}/usr/share/man/man8"
           mkdir -p "${PKG_ROOT}/usr/share/bash-completion/completions"
+          mkdir -p "${PKG_ROOT}/usr/share/mom"
           mkdir -p "${PKG_ROOT}/etc/logrotate.d"
           mkdir -p "${PKG_ROOT}/etc/mom"
+
+          # Deny list source files (merged into /etc/mom/deny.list at install time)
+          cp deny/deny.list "${PKG_ROOT}/usr/share/mom/deny.list"
+          cp deny/deny.apt.list "${PKG_ROOT}/usr/share/mom/deny.apt.list"
 
           # Binary
           cp dist/mom-linux-${{ matrix.arch }} "${PKG_ROOT}/usr/bin/mom"
@@ -195,9 +200,9 @@ jobs:
           mkdir -p /etc/mom
           chown root:root /etc/mom
           chmod 755 /etc/mom
-          # Create deny list if absent
+          # Build deny list from generic + OS-specific source files
           if [ ! -f /etc/mom/deny.list ]; then
-            touch /etc/mom/deny.list
+            cat /usr/share/mom/deny.list /usr/share/mom/deny.apt.list > /etc/mom/deny.list
           fi
           chown root:mom /etc/mom/deny.list
           chmod 640 /etc/mom/deny.list
@@ -271,9 +276,11 @@ jobs:
           cp dist/mom-linux-${{ matrix.arch }} ~/rpmbuild/SOURCES/mom-${VERSION}/mom
           chmod 755 ~/rpmbuild/SOURCES/mom-${VERSION}/mom
 
-          # Copy doc and completion files (these are checked into the repo)
+          # Copy doc, completion, and deny list files (these are checked into the repo)
           cp doc/mom.8 ~/rpmbuild/SOURCES/mom-${VERSION}/
           cp completions/mom.bash ~/rpmbuild/SOURCES/mom-${VERSION}/
+          cp deny/deny.list ~/rpmbuild/SOURCES/mom-${VERSION}/deny.list
+          cp deny/deny.dnf.list ~/rpmbuild/SOURCES/mom-${VERSION}/deny.dnf.list
 
           cd ~/rpmbuild/SOURCES && tar czf mom-${VERSION}.tar.gz mom-${VERSION}
 
@@ -304,6 +311,8 @@ jobs:
           # https_proxy =
           CONF
           touch %{buildroot}/etc/mom/deny.list
+          install -Dm644 deny.list %{buildroot}/usr/share/mom/deny.list
+          install -Dm644 deny.dnf.list %{buildroot}/usr/share/mom/deny.dnf.list
           install -Dm644 mom.8 %{buildroot}/usr/share/man/man8/mom.8
           install -Dm644 mom.bash %{buildroot}/usr/share/bash-completion/completions/mom
           mkdir -p %{buildroot}/etc/logrotate.d
@@ -329,9 +338,9 @@ jobs:
           # Set binary ownership and setuid bit (group-restricted)
           chown root:mom /usr/bin/mom
           chmod 4750 /usr/bin/mom
-          # Create deny list if absent
+          # Build deny list from generic + OS-specific source files
           if [ ! -f /etc/mom/deny.list ]; then
-            touch /etc/mom/deny.list
+            cat /usr/share/mom/deny.list /usr/share/mom/deny.dnf.list > /etc/mom/deny.list
           fi
           chown root:mom /etc/mom/deny.list
           chmod 640 /etc/mom/deny.list
@@ -353,6 +362,9 @@ jobs:
           %config(noreplace) /etc/mom/deny.list
           %dir /etc/mom
           /etc/logrotate.d/mom
+          /usr/share/mom/deny.list
+          /usr/share/mom/deny.dnf.list
+          %dir /usr/share/mom
           /usr/share/man/man8/mom.8*
           /usr/share/bash-completion/completions/mom
 

@@ -58,11 +58,14 @@ impl DenyList {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let glob = Glob::new(trimmed).with_context(|| {
-                format!("invalid glob pattern on line {}: {trimmed:?}", lineno + 1)
-            })?;
-            builder.add(glob);
-            patterns.push(trimmed.to_string());
+            // Each line may contain multiple space-separated patterns.
+            for token in trimmed.split_whitespace() {
+                let glob = Glob::new(token).with_context(|| {
+                    format!("invalid glob pattern on line {}: {token:?}", lineno + 1)
+                })?;
+                builder.add(glob);
+                patterns.push(token.to_string());
+            }
         }
 
         let globset = builder
@@ -151,6 +154,40 @@ mod tests {
         let dl = make_list("nma?\n");
         assert_eq!(dl.matches("nmap"), Some("nma?"));
         assert!(dl.matches("nmapz").is_none());
+    }
+
+    #[test]
+    fn test_multiple_patterns_per_line() {
+        let dl = make_list("# Exploitation frameworks\nmetasploit-framework setoolkit beef-xss\n# Crackers\njohn hashcat hydra\n");
+        assert_eq!(dl.len(), 6);
+        assert_eq!(
+            dl.matches("metasploit-framework"),
+            Some("metasploit-framework")
+        );
+        assert_eq!(dl.matches("setoolkit"), Some("setoolkit"));
+        assert_eq!(dl.matches("beef-xss"), Some("beef-xss"));
+        assert_eq!(dl.matches("john"), Some("john"));
+        assert_eq!(dl.matches("hashcat"), Some("hashcat"));
+        assert_eq!(dl.matches("hydra"), Some("hydra"));
+        assert!(dl.matches("curl").is_none());
+    }
+
+    #[test]
+    fn test_mixed_single_and_multi_per_line() {
+        let dl = make_list("nmap\nwireshark tshark\ntcpdump\n");
+        assert_eq!(dl.len(), 4);
+        assert_eq!(dl.matches("nmap"), Some("nmap"));
+        assert_eq!(dl.matches("wireshark"), Some("wireshark"));
+        assert_eq!(dl.matches("tshark"), Some("tshark"));
+        assert_eq!(dl.matches("tcpdump"), Some("tcpdump"));
+    }
+
+    #[test]
+    fn test_glob_wildcard_in_multi_line() {
+        let dl = make_list("python3-* ettercap-*\n");
+        assert_eq!(dl.matches("python3-dev"), Some("python3-*"));
+        assert_eq!(dl.matches("ettercap-common"), Some("ettercap-*"));
+        assert!(dl.matches("curl").is_none());
     }
 
     #[test]
