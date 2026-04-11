@@ -79,7 +79,7 @@ The sysadmin sets the binary permissions manually post-install. Document `chmod 
 
 If `mom.conf` does not exist, fall back to safe defaults (all values above).
 
-**Deny list file** (path configured via `deny_list`): one entry per line, glob patterns supported (e.g., `python3-*`). The file must be owned by the `mom` group; refuse to run if ownership check fails. If the file does not exist, treat as empty (no denials). Comments with `#` should be supported.
+**Deny list file** (path configured via `deny_list`): one or more entries per line (space-separated), glob patterns supported (e.g., `python3-*`). The file must be owned by the `mom` group; refuse to run if ownership check fails. If the file does not exist, treat as empty (no denials). Comments with `#` should be supported.
 
 ## Security Architecture
 

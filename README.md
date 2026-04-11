@@ -124,19 +124,17 @@ If `/etc/mom/mom.conf` does not exist, safe defaults are used for all values.
 
 ### Package Deny List
 
-`/etc/mom/deny.list` — one entry per line, glob patterns supported:
+`/etc/mom/deny.list` — one or more entries per line (space-separated), glob patterns supported:
 
 ```
 # Block network scanning tools
-nmap
-wireshark
+nmap wireshark masscan
 
 # Block all Python extension headers
 python3-*
 
 # Block all development packages
-*-dev
-*-devel
+*-dev *-devel
 ```
 
 The deny list file must be owned by root or the `mom` group. If the file is absent, no packages are denied.
