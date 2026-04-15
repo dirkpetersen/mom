@@ -1,5 +1,5 @@
 [package]
-name = "mom"
+name = "mom-inst"
 version = "0.2.15"
 edition = "2021"
 description = "Meta Overlay Manager — allow non-root users to install packages"

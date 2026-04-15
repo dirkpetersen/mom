@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-mom = { path = ".." }
+mom-inst = { path = ".." }
 
 [[bin]]
 name = "fuzz_package_name"

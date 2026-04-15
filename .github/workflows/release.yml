@@ -173,7 +173,7 @@ jobs:
 
           # Control file
           cat > "${PKG_ROOT}/DEBIAN/control" <<CONTROL
-          Package: mom
+          Package: mom-inst
           Version: ${VERSION}
           Section: admin
           Priority: optional
@@ -222,7 +222,7 @@ jobs:
           POSTINST
           chmod 755 "${PKG_ROOT}/DEBIAN/postinst"
 
-          fakeroot dpkg-deb --build "${PKG_ROOT}" "mom_${VERSION}_${{ matrix.distro }}_${{ matrix.arch }}.deb"
+          fakeroot dpkg-deb --build "${PKG_ROOT}" "mom-inst_${VERSION}_${{ matrix.distro }}_${{ matrix.arch }}.deb"
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -286,8 +286,8 @@ jobs:
 
           cd ~/rpmbuild/SOURCES && tar czf mom-${VERSION}.tar.gz mom-${VERSION}
 
-          cat > ~/rpmbuild/SPECS/mom.spec <<SPEC
-          Name:           mom
+          cat > ~/rpmbuild/SPECS/mom-inst.spec <<SPEC
+          Name:           mom-inst
           Version:        ${VERSION}
           Release:        1%{?dist}
           Summary:        Meta Overlay Manager
@@ -377,10 +377,10 @@ jobs:
           - Release ${VERSION}
           SPEC
 
-          rpmbuild -bb ~/rpmbuild/SPECS/mom.spec
+          rpmbuild -bb ~/rpmbuild/SPECS/mom-inst.spec
 
-          cp ~/rpmbuild/RPMS/x86_64/mom-*.rpm "${GITHUB_WORKSPACE}/mom-${VERSION}.${{ matrix.distro }}.x86_64.rpm" 2>/dev/null || \
-          cp ~/rpmbuild/RPMS/noarch/mom-*.rpm "${GITHUB_WORKSPACE}/mom-${VERSION}.${{ matrix.distro }}.noarch.rpm"
+          cp ~/rpmbuild/RPMS/x86_64/mom-inst-*.rpm "${GITHUB_WORKSPACE}/mom-inst-${VERSION}.${{ matrix.distro }}.x86_64.rpm" 2>/dev/null || \
+          cp ~/rpmbuild/RPMS/noarch/mom-inst-*.rpm "${GITHUB_WORKSPACE}/mom-inst-${VERSION}.${{ matrix.distro }}.noarch.rpm"
 
       - name: Upload .rpm artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

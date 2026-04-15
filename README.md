@@ -45,8 +45,8 @@ Install from [GitHub Releases](https://github.com/dirkpetersen/mom/releases) —
 # Pick your distro: debian-latest, ubuntu-2204, ubuntu-2404, or ubuntu-2604
 DISTRO=ubuntu-2404
 VER=$(curl -sI https://github.com/dirkpetersen/mom/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
-wget "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom_${VER}_${DISTRO}_amd64.deb"
-sudo dpkg -i mom_${VER}_${DISTRO}_amd64.deb
+wget "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst_${VER}_${DISTRO}_amd64.deb"
+sudo dpkg -i mom-inst_${VER}_${DISTRO}_amd64.deb
 ```
 
 ### RHEL / Rocky / Alma
@@ -55,7 +55,7 @@ sudo dpkg -i mom_${VER}_${DISTRO}_amd64.deb
 # Pick your version: el9 or el10
 EL=el9
 VER=$(curl -sI https://github.com/dirkpetersen/mom/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
-sudo dnf install "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-${VER}.${EL}.x86_64.rpm"
+sudo dnf install "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst-${VER}.${EL}.x86_64.rpm"
 ```
 
 ### After Install
