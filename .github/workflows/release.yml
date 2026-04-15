@@ -202,7 +202,7 @@ jobs:
           chmod 755 /etc/mom
           # Build deny list from generic + OS-specific source files
           # Use -s (not -f) so the merge also runs when the file exists but is empty
-          # (RPM %install creates an empty placeholder before %post runs)
+          # (RPM creates an empty placeholder before the post script runs)
           if [ ! -s /etc/mom/deny.list ]; then
             cat /usr/share/mom/deny.list /usr/share/mom/deny.apt.list > /etc/mom/deny.list
           fi
@@ -342,7 +342,7 @@ jobs:
           chmod 4750 /usr/bin/mom
           # Build deny list from generic + OS-specific source files
           # Use -s (not -f) so the merge also runs when the file exists but is empty
-          # (RPM %install creates an empty placeholder before %post runs)
+          # (RPM creates an empty placeholder before the post script runs)
           if [ ! -s /etc/mom/deny.list ]; then
             cat /usr/share/mom/deny.list /usr/share/mom/deny.dnf.list > /etc/mom/deny.list
           fi
