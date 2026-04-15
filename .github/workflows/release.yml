@@ -273,18 +273,18 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
 
           mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          mkdir -p ~/rpmbuild/SOURCES/mom-${VERSION}
+          mkdir -p ~/rpmbuild/SOURCES/mom-inst-${VERSION}
 
-          cp dist/mom-linux-${{ matrix.arch }} ~/rpmbuild/SOURCES/mom-${VERSION}/mom
-          chmod 755 ~/rpmbuild/SOURCES/mom-${VERSION}/mom
+          cp dist/mom-linux-${{ matrix.arch }} ~/rpmbuild/SOURCES/mom-inst-${VERSION}/mom
+          chmod 755 ~/rpmbuild/SOURCES/mom-inst-${VERSION}/mom
 
           # Copy doc, completion, and deny list files (these are checked into the repo)
-          cp doc/mom.8 ~/rpmbuild/SOURCES/mom-${VERSION}/
-          cp completions/mom.bash ~/rpmbuild/SOURCES/mom-${VERSION}/
-          cp deny/deny.list ~/rpmbuild/SOURCES/mom-${VERSION}/deny.list
-          cp deny/deny.dnf.list ~/rpmbuild/SOURCES/mom-${VERSION}/deny.dnf.list
+          cp doc/mom.8 ~/rpmbuild/SOURCES/mom-inst-${VERSION}/
+          cp completions/mom.bash ~/rpmbuild/SOURCES/mom-inst-${VERSION}/
+          cp deny/deny.list ~/rpmbuild/SOURCES/mom-inst-${VERSION}/deny.list
+          cp deny/deny.dnf.list ~/rpmbuild/SOURCES/mom-inst-${VERSION}/deny.dnf.list
 
-          cd ~/rpmbuild/SOURCES && tar czf mom-${VERSION}.tar.gz mom-${VERSION}
+          cd ~/rpmbuild/SOURCES && tar czf mom-inst-${VERSION}.tar.gz mom-inst-${VERSION}
 
           cat > ~/rpmbuild/SPECS/mom-inst.spec <<SPEC
           Name:           mom-inst
@@ -292,7 +292,7 @@ jobs:
           Release:        1%{?dist}
           Summary:        Meta Overlay Manager
           License:        MIT
-          Source0:        mom-${VERSION}.tar.gz
+          Source0:        mom-inst-${VERSION}.tar.gz
 
           %description
           Allow non-root users to install and update packages
