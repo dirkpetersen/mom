@@ -24,6 +24,18 @@ mom --check                     # validate configuration (sysadmin use)
 
 Add `-y` to suppress interactive prompts — same semantics as `apt-get -y` and `dnf -y`.
 
+## Why mom?
+
+There are two situations where giving users direct `sudo apt-get` or `sudo dnf` access is problematic — but where they still need to install packages.
+
+### 1. AI coding sandboxes
+
+Autonomous coding agents like [Claude Code](https://claude.ai/code) running in a sandbox such as [Maude](https://github.com/dirkpetersen/maude) need to install packages on the fly. When an agent is working through your requirements — designing, coding, testing — it may determine that it needs `ffmpeg`, `imagemagick`, or a C library. Without `mom`, the agent has to interrupt you and ask for permission. With `mom`, the agent can install what it needs and keep working, because the entire OS is a disposable sandbox built for this purpose.
+
+### 2. Researcher-managed machines
+
+Research computing teams often support scientists who purchase their own lab servers. These researchers need to install domain-specific tools (`samtools`, `gdal`, `R` packages with system dependencies), but giving them `sudo apt-get` effectively gives them **full root access** — `apt-get` supports hooks, pre/post-install scripts, and arbitrary repository sources that can modify anything on the system. `mom` strips all of that away: it only allows installing packages by name from already-configured repositories, blocks packages on a deny list, sanitizes the environment, and logs every action. This covers ~95% of why researchers want root access in the first place, without the security risks.
+
 ## Features
 
 - Install and update packages by name on Debian/Ubuntu and RHEL/Rocky Linux
