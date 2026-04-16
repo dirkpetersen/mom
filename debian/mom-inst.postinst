@@ -1,0 +1,43 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create mom group if it doesn't exist
+        if ! getent group mom >/dev/null 2>&1; then
+            addgroup --system mom
+        fi
+
+        # Set setuid-root with group-restricted execute via dpkg-statoverride
+        if ! dpkg-statoverride --list /usr/bin/mom >/dev/null 2>&1; then
+            dpkg-statoverride --update --add root mom 4750 /usr/bin/mom
+        fi
+
+        # Create config directory
+        install -dm755 -o root -g root /etc/mom
+
+        # Build deny list from generic + Debian-specific source files
+        if [ ! -s /etc/mom/deny.list ]; then
+            cat /usr/share/mom/deny.list /usr/share/mom/deny.apt.list > /etc/mom/deny.list
+        fi
+        chown root:mom /etc/mom/deny.list
+        chmod 640 /etc/mom/deny.list
+
+        # Create log file if absent
+        if [ ! -f /var/log/mom.log ]; then
+            touch /var/log/mom.log
+        fi
+        chown root:mom /var/log/mom.log
+        chmod 640 /var/log/mom.log
+
+        echo ""
+        echo "mom installed successfully!"
+        echo "Add users to the 'mom' group to allow them to install packages:"
+        echo "  sudo usermod -aG mom <username>"
+        echo ""
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

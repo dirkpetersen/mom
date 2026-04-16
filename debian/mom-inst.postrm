@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        # Remove statoverride for setuid binary
+        dpkg-statoverride --remove /usr/bin/mom 2>/dev/null || true
+
+        # Clean up config and log files
+        rm -f /etc/mom/deny.list /etc/mom/mom.conf
+        rmdir /etc/mom 2>/dev/null || true
+        rm -f /var/log/mom.log
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

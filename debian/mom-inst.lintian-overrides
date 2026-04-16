@@ -1,0 +1,5 @@
+# mom is intentionally a setuid-root binary — this is its core design.
+# Access is restricted to members of the "mom" group via 4750 permissions
+# set through dpkg-statoverride in postinst. See SECURITY.md for the
+# full threat model.
+mom-inst: elevated-privileges 4750 root/mom [usr/bin/mom]

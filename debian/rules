@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --buildsystem=cargo
+
+override_dh_auto_install:
+	dh_auto_install
+	# Install deny list source files
+	install -Dm644 deny/deny.list debian/mom-inst/usr/share/mom/deny.list
+	install -Dm644 deny/deny.apt.list debian/mom-inst/usr/share/mom/deny.apt.list
+	# Install logrotate configuration
+	install -Dm644 packaging/logrotate.d/mom debian/mom-inst/etc/logrotate.d/mom
+	# Install default config file
+	install -dm755 debian/mom-inst/etc/mom
+	install -m644 debian/mom.conf debian/mom-inst/etc/mom/mom.conf

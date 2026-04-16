@@ -1,0 +1,45 @@
+Source: mom-inst
+Section: admin
+Priority: optional
+Maintainer: Dirk Petersen <dirk@petersen.dev>
+Build-Depends:
+ debhelper-compat (= 14),
+ dh-cargo,
+ librust-anyhow-1-dev,
+ librust-chrono-0.4+serde-dev,
+ librust-clap-4+derive-dev,
+ librust-globset-0.4-dev,
+ librust-libc-0.2-dev,
+ librust-nix-0.29+fs-dev,
+ librust-nix-0.29+process-dev,
+ librust-nix-0.29+signal-dev,
+ librust-nix-0.29+user-dev,
+ librust-serde-1+derive-dev,
+ librust-serde-json-1-dev,
+ librust-syslog-6-dev,
+ librust-tempfile-3-dev <!nocheck>,
+Standards-Version: 4.7.2
+Homepage: https://github.com/dirkpetersen/mom
+Vcs-Git: https://github.com/dirkpetersen/mom.git
+Vcs-Browser: https://github.com/dirkpetersen/mom
+Rules-Requires-Root: binary-targets
+
+Package: mom-inst
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ adduser,
+Pre-Depends: ${misc:Pre-Depends}
+Description: Meta Overlay Manager - install packages without root access
+ mom allows non-root users to install and update packages on systems where
+ they lack root access. It wraps apt-get (Debian/Ubuntu) and dnf (RHEL)
+ with a security-hardened setuid binary.
+ .
+ A sysadmin deploys it once; authorized users (members of the "mom" group)
+ can then install packages without sudo or root access. All operations are
+ logged to a JSON audit log and syslog.
+ .
+ Security features include complete environment sanitization, strict package
+ name validation, a configurable deny list with glob pattern support,
+ hardcoded package manager paths, and supplemental group dropping.
