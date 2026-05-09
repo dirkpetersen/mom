@@ -33,6 +33,10 @@ struct Cli {
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
 
+    /// Skip recommended/optional dependencies (apt-get --no-install-recommends / dnf --no-deps)
+    #[arg(long = "no-recommends", global = true)]
+    no_recommends: bool,
+
     /// Validate configuration and deny list without performing any package operations
     #[arg(long = "check", global = true)]
     check: bool,
@@ -153,7 +157,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             ));
-            let rc = exec::refresh(&pm, cli.yes, &cfg)?;
+            let rc = exec::refresh(&pm, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(&logger, real_uid.as_raw(), &real_user, "refresh", &[], rc);
             maybe_exit(rc);
             Ok(())
@@ -182,7 +186,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             ));
-            let rc = exec::install(&pm, &packages, cli.yes, &cfg)?;
+            let rc = exec::install(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(
                 &logger,
                 real_uid.as_raw(),
@@ -239,7 +243,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             ));
-            let rc = exec::update(&pm, &packages, cli.yes, &cfg)?;
+            let rc = exec::update(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(
                 &logger,
                 real_uid.as_raw(),

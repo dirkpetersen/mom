@@ -1,14 +1,16 @@
-.TH MOM 8 "2026-03-25" "mom 0.1.0" "System Manager's Manual"
+.TH MOM 8 "2026-04-15" "mom 0.2.17" "System Manager's Manual"
 .SH NAME
 mom \- Meta Overlay Manager: install packages without root access
 .SH SYNOPSIS
 .B mom
 .RB [ \-y ]
+.RB [ \-\-no\-recommends ]
 .B install
 .IR package " [" package "...]"
 .br
 .B mom
 .RB [ \-y ]
+.RB [ \-\-no\-recommends ]
 .B update
 .IR package " [" package "...]"
 .br
@@ -58,6 +60,17 @@ Suppress interactive prompts. Passed directly to
 .B apt-get
 or
 .BR dnf .
+.TP
+.B \-\-no\-recommends
+Skip recommended and optional dependencies. Passed as
+.B \-\-no\-install\-recommends
+to
+.B apt-get
+and as
+.B \-\-no\-deps
+to
+.BR dnf .
+Useful for minimal installs where disk space or attack surface matters.
 .TP
 .B \-\-check
 Validate the configuration file and deny list without performing any

@@ -19,3 +19,6 @@ rsh
 
 # ncat ships separately from nmap on RHEL
 nmap-ncat
+
+# python3-scapy (packet crafting, RHEL name)
+python3-scapy

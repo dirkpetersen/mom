@@ -22,4 +22,7 @@ ftpd fingerd talkd
 rsh-client rsh-server rsh-redone-client rsh-redone-server
 
 # netcat variants
-netcat-traditional netcat-openbsd
+netcat-traditional netcat-openbsd ncat
+
+# python3-scapy (packet crafting, Debian name)
+python3-scapy

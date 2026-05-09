@@ -15,7 +15,7 @@ impacket crackmapexec evil-winrm
 # Password Crackers
 john hashcat hydra medusa ncrack patator
 ophcrack crunch rainbowcrack rsmangler
-fcrackzip pdfcrack pipal
+fcrackzip pdfcrack pipal cewl sshpass
 
 # Network Attack / MITM Tools
 bettercap arpspoof dsniff mitmproxy responder
@@ -32,13 +32,17 @@ hostapd-wpe wifi-honey eaphammer
 sqlmap nikto skipfish w3af w3af-console
 wfuzz gobuster dirbuster dirb ffuf feroxbuster
 commix xsser wpscan joomscan droopescan
-dalfox nuclei subfinder amass httprobe
+dalfox nuclei subfinder amass httprobe whatweb
 
 # Packet Sniffers & Network Scanners
 wireshark tcpdump nmap masscan zmap
 p0f xprobe2 unicornscan netsniff-ng
 driftnet urlsnarf webspy msgsnarf filesnarf
 ssldump sslsniff tcpflow tcpick tcpxtract chaosreader
+hping3 bettercap yersinia macchanger mitmproxy
+
+# Network Reconnaissance
+ncat bpytop nmap-frontend
 
 # Keyloggers & Input Capture
 logkeys keylogger xspy xkeylogger
@@ -47,13 +51,21 @@ logkeys keylogger xspy xkeylogger
 telnet ftp finger talk
 rlogin rexec
 
-# DNS / ICMP Tunneling & Evasion Tools
+# Tunneling, Anonymization & VPN
 iodine iodine-client iodine-server dns2tcp nstx
 ptunnel ptunnel-ng icmptunnel hans proxytunnel
 3proxy redsocks torsocks tor obfs4proxy meek-client
+openvpn wireguard* vpnc strongswan* tsocks proxychains*
+
+# Sandbox Escape: FUSE Network Mounts
+sshfs cifs-utils nfs-common smbclient bindfs davfs2
+rclone gvfs* s3fs*
 
 # Rootkit Detection (block to prevent adversarial use)
 chkrootkit rkhunter unhide
+
+# Kernel Module Manipulation
+dkms linux-headers* module-assistant systemtap kdump-tools
 
 # Vulnerability Scanners
 openvas openvas-scanner openvas-manager

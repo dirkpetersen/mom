@@ -1,3 +1,13 @@
+mom-inst (0.2.17-1) unstable; urgency=medium
+
+  * Add --no-recommends flag: passes --no-install-recommends to apt-get
+    and --no-deps to dnf for minimal dependency installs.
+  * Expand deny list: add sandbox-escape (FUSE mounts, VPN/tunnel tools),
+    kernel module manipulation, and additional recon/attack packages
+    per security review recommendations.
+
+ -- Dirk Petersen <dirk@petersen.dev>  Wed, 15 Apr 2026 12:00:00 +0000
+
 mom-inst (0.2.16-1) unstable; urgency=medium
 
   * Initial Debian packaging.
