@@ -1,3 +1,11 @@
+mom-inst (0.2.18-1) unstable; urgency=medium
+
+  * Build arm64 .deb packages for all supported Debian/Ubuntu distros.
+  * Build arm64 .rpm packages for el9 and el10.
+  * Add Amazon Linux 2023 (amd64 and arm64) as a supported RPM target.
+
+ -- Dirk Petersen <dirk@petersen.dev>  Fri, 09 May 2026 12:00:00 +0000
+
 mom-inst (0.2.17-1) unstable; urgency=medium
 
   * Add --no-recommends flag: passes --no-install-recommends to apt-get

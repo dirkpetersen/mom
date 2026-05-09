@@ -77,15 +77,27 @@ jobs:
           - distro: debian-latest
             image: debian:bookworm
             arch: amd64
+          - distro: debian-latest
+            image: debian:bookworm
+            arch: arm64
           - distro: ubuntu-2204
             image: ubuntu:22.04
             arch: amd64
+          - distro: ubuntu-2204
+            image: ubuntu:22.04
+            arch: arm64
           - distro: ubuntu-2404
             image: ubuntu:24.04
             arch: amd64
+          - distro: ubuntu-2404
+            image: ubuntu:24.04
+            arch: arm64
           - distro: ubuntu-2604
             image: ubuntu:26.04
             arch: amd64
+          - distro: ubuntu-2604
+            image: ubuntu:26.04
+            arch: arm64
     container:
       image: ${{ matrix.image }}
     steps:
@@ -241,9 +253,27 @@ jobs:
           - distro: el9
             image: rockylinux:9
             arch: amd64
+            rpm_arch: x86_64
+          - distro: el9
+            image: rockylinux:9
+            arch: arm64
+            rpm_arch: aarch64
           - distro: el10
             image: almalinux:10
             arch: amd64
+            rpm_arch: x86_64
+          - distro: el10
+            image: almalinux:10
+            arch: arm64
+            rpm_arch: aarch64
+          - distro: amzn2023
+            image: amazonlinux:2023
+            arch: amd64
+            rpm_arch: x86_64
+          - distro: amzn2023
+            image: amazonlinux:2023
+            arch: arm64
+            rpm_arch: aarch64
     container:
       image: ${{ matrix.image }}
     steps:
@@ -377,9 +407,9 @@ jobs:
           - Release ${VERSION}
           SPEC
 
-          rpmbuild -bb ~/rpmbuild/SPECS/mom-inst.spec
+          rpmbuild -bb --target ${{ matrix.rpm_arch }} ~/rpmbuild/SPECS/mom-inst.spec
 
-          cp ~/rpmbuild/RPMS/x86_64/mom-inst-*.rpm "${GITHUB_WORKSPACE}/mom-inst-${VERSION}.${{ matrix.distro }}.x86_64.rpm" 2>/dev/null || \
+          cp ~/rpmbuild/RPMS/${{ matrix.rpm_arch }}/mom-inst-*.rpm "${GITHUB_WORKSPACE}/mom-inst-${VERSION}.${{ matrix.distro }}.${{ matrix.rpm_arch }}.rpm" 2>/dev/null || \
           cp ~/rpmbuild/RPMS/noarch/mom-inst-*.rpm "${GITHUB_WORKSPACE}/mom-inst-${VERSION}.${{ matrix.distro }}.noarch.rpm"
 
       - name: Upload .rpm artifact

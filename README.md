@@ -7,7 +7,7 @@
 [![CI](https://github.com/dirkpetersen/mom/actions/workflows/ci.yml/badge.svg)](https://github.com/dirkpetersen/mom/actions/workflows/ci.yml)
 [![Release](https://github.com/dirkpetersen/mom/actions/workflows/release.yml/badge.svg)](https://github.com/dirkpetersen/mom/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-Debian%20%7C%20Ubuntu%20%7C%20RHEL-informational)](#installation)
+[![Platforms](https://img.shields.io/badge/platforms-Debian%20%7C%20Ubuntu%20%7C%20RHEL%20%7C%20Amazon%20Linux-informational)](#installation)
 
 Allow non-root users to install and update packages on systems where they lack root access.
 
@@ -55,19 +55,23 @@ Install from [GitHub Releases](https://github.com/dirkpetersen/mom/releases) —
 
 ```bash
 # Pick your distro: debian-latest, ubuntu-2204, ubuntu-2404, or ubuntu-2604
+# Pick your arch: amd64 or arm64
 DISTRO=ubuntu-2404
+ARCH=amd64
 VER=$(curl -sI https://github.com/dirkpetersen/mom/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
-wget "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst_${VER}_${DISTRO}_amd64.deb"
-sudo dpkg -i mom-inst_${VER}_${DISTRO}_amd64.deb
+wget "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst_${VER}_${DISTRO}_${ARCH}.deb"
+sudo dpkg -i mom-inst_${VER}_${DISTRO}_${ARCH}.deb
 ```
 
-### RHEL / Rocky / Alma
+### RHEL / Rocky / Alma / Amazon Linux
 
 ```bash
-# Pick your version: el9 or el10
+# Pick your distro: el9, el10, or amzn2023
+# Pick your arch: x86_64 or aarch64
 EL=el9
+ARCH=x86_64
 VER=$(curl -sI https://github.com/dirkpetersen/mom/releases/latest | grep -i location | grep -oP 'v\K[0-9.]+')
-sudo dnf install "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst-${VER}.${EL}.x86_64.rpm"
+sudo dnf install "https://github.com/dirkpetersen/mom/releases/download/v${VER}/mom-inst-${VER}.${EL}.${ARCH}.rpm"
 ```
 
 ### After Install
@@ -104,14 +108,14 @@ sudo touch /etc/mom/deny.list && sudo chown root:mom /etc/mom/deny.list && sudo 
 sudo touch /var/log/mom.log && sudo chmod 640 /var/log/mom.log
 ```
 
-| Platform | Download |
-|----------|----------|
-| Debian (bookworm) | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
-| Ubuntu 22.04 / 24.04 / 26.04 | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
-| RHEL 9 / Rocky 9 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
-| RHEL 10 / Alma 10 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
-| Any Linux x86_64 | [binary](https://github.com/dirkpetersen/mom/releases/latest) |
-| Any Linux aarch64 | [binary](https://github.com/dirkpetersen/mom/releases/latest) |
+| Platform | amd64 | arm64 |
+|----------|-------|-------|
+| Debian (bookworm) | [.deb](https://github.com/dirkpetersen/mom/releases/latest) | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
+| Ubuntu 22.04 / 24.04 / 26.04 | [.deb](https://github.com/dirkpetersen/mom/releases/latest) | [.deb](https://github.com/dirkpetersen/mom/releases/latest) |
+| RHEL 9 / Rocky 9 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
+| RHEL 10 / Alma 10 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
+| Amazon Linux 2023 | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) | [.rpm](https://github.com/dirkpetersen/mom/releases/latest) |
+| Any Linux | [binary](https://github.com/dirkpetersen/mom/releases/latest) | [binary](https://github.com/dirkpetersen/mom/releases/latest) |
 
 ## Configuration
 
