@@ -23,13 +23,25 @@ extern "C" fn forward_signal(sig: libc::c_int) {
 }
 
 /// Run `apt-get install [packages]` or `dnf install [packages]`.
-pub fn install(pm: &PackageManager, packages: &[String], yes: bool, no_recommends: bool, cfg: &Config) -> Result<i32> {
+pub fn install(
+    pm: &PackageManager,
+    packages: &[String],
+    yes: bool,
+    no_recommends: bool,
+    cfg: &Config,
+) -> Result<i32> {
     let args = pm.install_cmd_args(packages, yes, no_recommends);
     run_pkg_cmd(pm.binary(), &args, cfg)
 }
 
 /// Refresh repos, then run `apt-get install --only-upgrade` / `dnf upgrade`.
-pub fn update(pm: &PackageManager, packages: &[String], yes: bool, no_recommends: bool, cfg: &Config) -> Result<i32> {
+pub fn update(
+    pm: &PackageManager,
+    packages: &[String],
+    yes: bool,
+    no_recommends: bool,
+    cfg: &Config,
+) -> Result<i32> {
     // Step 1: refresh
     let rc = refresh(pm, yes, no_recommends, cfg)?;
     if rc != 0 {

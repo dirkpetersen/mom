@@ -15,7 +15,12 @@ impl PackageManager {
         }
     }
 
-    pub fn install_cmd_args(&self, packages: &[String], yes: bool, no_recommends: bool) -> Vec<String> {
+    pub fn install_cmd_args(
+        &self,
+        packages: &[String],
+        yes: bool,
+        no_recommends: bool,
+    ) -> Vec<String> {
         let mut args = vec!["install".to_string()];
         if yes {
             args.push("-y".to_string());
@@ -30,7 +35,12 @@ impl PackageManager {
         args
     }
 
-    pub fn update_cmd_args(&self, packages: &[String], yes: bool, no_recommends: bool) -> Vec<String> {
+    pub fn update_cmd_args(
+        &self,
+        packages: &[String],
+        yes: bool,
+        no_recommends: bool,
+    ) -> Vec<String> {
         match self {
             PackageManager::Apt => {
                 let mut args = vec!["install".to_string(), "--only-upgrade".to_string()];
@@ -158,7 +168,10 @@ mod tests {
     fn test_apt_install_no_recommends() {
         let pm = PackageManager::Apt;
         let args = pm.install_cmd_args(&["curl".to_string()], true, true);
-        assert_eq!(args, vec!["install", "-y", "--no-install-recommends", "curl"]);
+        assert_eq!(
+            args,
+            vec!["install", "-y", "--no-install-recommends", "curl"]
+        );
     }
 
     #[test]
@@ -179,7 +192,16 @@ mod tests {
     fn test_apt_update_no_recommends() {
         let pm = PackageManager::Apt;
         let args = pm.update_cmd_args(&["curl".to_string()], true, true);
-        assert_eq!(args, vec!["install", "--only-upgrade", "-y", "--no-install-recommends", "curl"]);
+        assert_eq!(
+            args,
+            vec![
+                "install",
+                "--only-upgrade",
+                "-y",
+                "--no-install-recommends",
+                "curl"
+            ]
+        );
     }
 
     #[test]
