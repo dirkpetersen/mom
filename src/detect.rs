@@ -67,6 +67,14 @@ impl PackageManager {
         }
     }
 
+    pub fn upgrade_cmd_args(&self, yes: bool) -> Vec<String> {
+        let mut args = vec!["upgrade".to_string()];
+        if yes {
+            args.push("-y".to_string());
+        }
+        args
+    }
+
     pub fn refresh_cmd_args(&self) -> Vec<String> {
         match self {
             PackageManager::Apt => vec!["update".to_string()],
@@ -216,6 +224,20 @@ mod tests {
         let pm = PackageManager::Dnf;
         let args = pm.update_cmd_args(&["curl".to_string()], true, true);
         assert_eq!(args, vec!["upgrade", "-y", "--no-deps", "curl"]);
+    }
+
+    #[test]
+    fn test_apt_upgrade_args() {
+        let pm = PackageManager::Apt;
+        assert_eq!(pm.upgrade_cmd_args(false), vec!["upgrade"]);
+        assert_eq!(pm.upgrade_cmd_args(true), vec!["upgrade", "-y"]);
+    }
+
+    #[test]
+    fn test_dnf_upgrade_args() {
+        let pm = PackageManager::Dnf;
+        assert_eq!(pm.upgrade_cmd_args(false), vec!["upgrade"]);
+        assert_eq!(pm.upgrade_cmd_args(true), vec!["upgrade", "-y"]);
     }
 
     #[test]

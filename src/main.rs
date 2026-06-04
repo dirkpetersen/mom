@@ -59,6 +59,8 @@ enum Commands {
         #[arg(required = true, num_args = 1..)]
         packages: Vec<String>,
     },
+    /// Refresh repos, then upgrade all installed packages (equivalent to apt-get upgrade / dnf upgrade)
+    Upgrade,
     /// Refresh package repository metadata only
     Refresh,
 }
@@ -133,6 +135,31 @@ fn run() -> Result<()> {
             use clap::CommandFactory;
             Cli::command().print_help()?;
             println!();
+            Ok(())
+        }
+
+        Some(Commands::Upgrade) => {
+            require_group_membership(
+                real_uid,
+                real_gid,
+                &cfg,
+                &logger,
+                &real_user,
+                "upgrade",
+                &[],
+            )?;
+            let pm = detect::detect_package_manager()?;
+            logger.log(log::Entry::new(
+                real_uid.as_raw(),
+                &real_user,
+                "upgrade",
+                vec![],
+                "initiated",
+                None,
+            ));
+            let rc = exec::upgrade(&pm, cli.yes, &cfg)?;
+            log_outcome(&logger, real_uid.as_raw(), &real_user, "upgrade", &[], rc);
+            maybe_exit(rc);
             Ok(())
         }
 

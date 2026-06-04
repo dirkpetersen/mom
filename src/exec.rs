@@ -52,6 +52,16 @@ pub fn update(
     run_pkg_cmd(pm.binary(), &args, cfg)
 }
 
+/// Run `apt-get update && apt-get upgrade` / `dnf upgrade` (full system upgrade).
+pub fn upgrade(pm: &PackageManager, yes: bool, cfg: &Config) -> Result<i32> {
+    let rc = refresh(pm, yes, false, cfg)?;
+    if rc != 0 {
+        return Ok(rc);
+    }
+    let args = pm.upgrade_cmd_args(yes);
+    run_pkg_cmd(pm.binary(), &args, cfg)
+}
+
 /// Run `apt-get update` / `dnf makecache`.
 pub fn refresh(pm: &PackageManager, _yes: bool, _no_recommends: bool, cfg: &Config) -> Result<i32> {
     let args = pm.refresh_cmd_args();
