@@ -28,7 +28,10 @@ impl PackageManager {
         if no_recommends {
             match self {
                 PackageManager::Apt => args.push("--no-install-recommends".to_string()),
-                PackageManager::Dnf => args.push("--no-deps".to_string()),
+                // dnf's `--no-deps` skips ALL dependency resolution, which can
+                // install a package without its hard deps and leave it broken.
+                // The correct "skip recommends/weak deps only" knob is this setopt.
+                PackageManager::Dnf => args.push("--setopt=install_weak_deps=False".to_string()),
             }
         }
         args.extend_from_slice(packages);
@@ -59,7 +62,8 @@ impl PackageManager {
                     args.push("-y".to_string());
                 }
                 if no_recommends {
-                    args.push("--no-deps".to_string());
+                    // See install_cmd_args: skip weak deps, not all deps.
+                    args.push("--setopt=install_weak_deps=False".to_string());
                 }
                 args.extend_from_slice(packages);
                 args
@@ -186,7 +190,10 @@ mod tests {
     fn test_dnf_install_no_recommends() {
         let pm = PackageManager::Dnf;
         let args = pm.install_cmd_args(&["curl".to_string()], false, true);
-        assert_eq!(args, vec!["install", "--no-deps", "curl"]);
+        assert_eq!(
+            args,
+            vec!["install", "--setopt=install_weak_deps=False", "curl"]
+        );
     }
 
     #[test]
@@ -223,7 +230,10 @@ mod tests {
     fn test_dnf_update_no_recommends() {
         let pm = PackageManager::Dnf;
         let args = pm.update_cmd_args(&["curl".to_string()], true, true);
-        assert_eq!(args, vec!["upgrade", "-y", "--no-deps", "curl"]);
+        assert_eq!(
+            args,
+            vec!["upgrade", "-y", "--setopt=install_weak_deps=False", "curl"]
+        );
     }
 
     #[test]

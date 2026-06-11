@@ -79,12 +79,43 @@ pub fn is_installed(pm: &PackageManager, package: &str, cfg: &Config) -> Result<
     if *pm == PackageManager::Apt {
         // Single execution: capture output and check both exit code and status prefix.
         let env = build_env(cfg);
-        let (rc, output) = run_capture(pm.is_installed_binary(), &args, &env)?;
+        let (rc, output) = run_capture(pm.is_installed_binary(), &args, &env, 64)?;
         Ok(rc == 0 && output.starts_with("ii"))
     } else {
         let rc = run_pkg_cmd_silent(pm.is_installed_binary(), &args, cfg)?;
         Ok(rc == 0)
     }
+}
+
+/// Confirm that `package` names an *exact* package known to apt.
+///
+/// `apt-get install` reinterprets an argument as a POSIX regex when it contains
+/// `.`/`?`/`*` and matches no package exactly, and treats a trailing `-`/`+` as a
+/// remove/install modifier. The package-name validator permits `.`, `+`, and `-`,
+/// so without this check a `mom`-group user could smuggle a denied package past
+/// the literal deny match (`n.ap` -> `nmap`) or remove arbitrary packages
+/// (`bash-` removes `bash`). apt-get prefers an exact package name over both
+/// reinterpretations, so once we know the literal string is a real package name,
+/// `apt-get install <name>` can only act on that single package and the deny
+/// check on the literal string is authoritative.
+pub fn apt_package_exists_exact(package: &str, cfg: &Config) -> Result<bool> {
+    let env = build_env(cfg);
+    let args = vec!["show".to_string(), package.to_string()];
+    // apt-cache reads only the local cache (no network) and does not apply the
+    // install/remove modifier semantics. We compare the literal string against
+    // each `Package:` field, so even if apt-cache itself expanded a regex the
+    // result is still rejected unless the literal equals a real package name.
+    let (_rc, output) = run_capture("/usr/bin/apt-cache", &args, &env, 256 * 1024)?;
+    Ok(show_output_names_exact(&output, package))
+}
+
+/// Return true if `apt-cache show` output contains a `Package:` field whose
+/// value equals `package` exactly.
+fn show_output_names_exact(output: &str, package: &str) -> bool {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("Package:"))
+        .any(|name| name.trim() == package)
 }
 
 /// Fork and exec `binary` with `args`, forwarding stdin/stdout/stderr to the
@@ -101,10 +132,17 @@ fn run_pkg_cmd_silent(binary: &str, args: &[String], cfg: &Config) -> Result<i32
     run_execve(binary, args, &env, true)
 }
 
-/// Run a command and capture its stdout (for parsing output like dpkg-query status).
-/// Stderr is redirected to /dev/null. Returns (exit_code, trimmed_stdout).
-/// Output is capped at 64 bytes to prevent OOM from a compromised binary.
-fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, String)> {
+/// Run a command and capture its stdout (for parsing output like dpkg-query
+/// status or apt-cache stanzas). Stderr is redirected to /dev/null. Returns
+/// (exit_code, trimmed_stdout). Accumulated output is capped at `max_bytes` to
+/// prevent OOM from a compromised binary; bytes past the cap are drained and
+/// discarded so the child never blocks on a full pipe.
+fn run_capture(
+    binary: &str,
+    args: &[String],
+    env: &[String],
+    max_bytes: usize,
+) -> Result<(i32, String)> {
     let c_binary = CString::new(binary).context("binary path contains null byte")?;
     let mut c_args: Vec<CString> = Vec::with_capacity(args.len() + 1);
     c_args.push(c_binary.clone());
@@ -156,13 +194,28 @@ fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, St
         }
         Ok(ForkResult::Parent { child }) => {
             unsafe { libc::close(pipe_write) };
-            // Read stdout from pipe, capped at 64 bytes to prevent OOM
-            let mut buf = [0u8; 64];
+            // Read stdout from the pipe. Accumulation is capped at `max_bytes`,
+            // but we keep draining past the cap so the child never blocks on a
+            // full pipe (which would deadlock the waitpid below).
             let mut file = unsafe { File::from_raw_fd(pipe_read) };
             use std::io::Read;
-            let n = file.read(&mut buf).unwrap_or(0);
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match file.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if buf.len() < max_bytes {
+                            let room = max_bytes - buf.len();
+                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                        // bytes beyond the cap are read and discarded to drain
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
             drop(file); // closes pipe_read
-                        // Wait for child
             let exit_code = loop {
                 match waitpid(child, None) {
                     Ok(WaitStatus::Exited(_, code)) => break code,
@@ -171,7 +224,7 @@ fn run_capture(binary: &str, args: &[String], env: &[String]) -> Result<(i32, St
                     _ => continue,
                 }
             };
-            let output = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            let output = String::from_utf8_lossy(&buf).trim().to_string();
             Ok((exit_code, output))
         }
     }
@@ -371,6 +424,54 @@ mod tests {
         let env = build_env(&cfg);
         assert!(!env.iter().any(|e| e.starts_with("LD_PRELOAD=")));
         assert!(!env.iter().any(|e| e.starts_with("EVIL_VAR=")));
+    }
+
+    #[test]
+    fn test_show_output_exact_match() {
+        let out = "Package: nmap\nVersion: 7.94\nDescription: scanner\n";
+        assert!(show_output_names_exact(out, "nmap"));
+    }
+
+    #[test]
+    fn test_show_output_regex_smuggle_rejected() {
+        // `n.ap` triggers apt regex mode and resolves to nmap; the literal
+        // string must NOT be accepted as an exact package (finding 1).
+        let out = "Package: nmap\nVersion: 7.94\n";
+        assert!(!show_output_names_exact(out, "n.ap"));
+    }
+
+    #[test]
+    fn test_show_output_trailing_dash_rejected() {
+        // `bash-` is apt's remove modifier; apt-cache reports no such package
+        // so it must be rejected (finding 2).
+        let out = "";
+        assert!(!show_output_names_exact(out, "bash-"));
+    }
+
+    #[test]
+    fn test_show_output_trailing_plus_rejected() {
+        // `nmap+` (apt install modifier) does not name an exact package.
+        let out = "Package: nmap\n";
+        assert!(!show_output_names_exact(out, "nmap+"));
+    }
+
+    #[test]
+    fn test_show_output_legit_plus_name_accepted() {
+        // `g++` legitimately ends in `+` and is a real package — must pass.
+        let out = "Package: g++\nVersion: 4:13.2.0\n";
+        assert!(show_output_names_exact(out, "g++"));
+    }
+
+    #[test]
+    fn test_show_output_legit_dotted_name_accepted() {
+        // `.` is legal in Debian names (e.g. gir1.2-glib-2.0) — must pass.
+        let out = "Package: gir1.2-glib-2.0\nVersion: 2.80\n";
+        assert!(show_output_names_exact(out, "gir1.2-glib-2.0"));
+    }
+
+    #[test]
+    fn test_show_output_empty_rejected() {
+        assert!(!show_output_names_exact("", "anything"));
     }
 
     #[test]

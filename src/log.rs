@@ -98,6 +98,41 @@ impl AuditLogger {
             );
         }
         let mut file = unsafe { File::from_raw_fd(fd) };
+
+        // SECURITY: O_NOFOLLOW only guards the final path component. Validate the
+        // opened fd itself (fstat — no TOCTOU) before writing as root:
+        //   - must be a regular file (not a fifo/device/etc.)
+        //   - exactly one hard link (blocks a pre-existing hardlink to a
+        //     sensitive file such as /etc/passwd that we'd otherwise append to)
+        //   - owned by root when we actually hold root (the production setuid
+        //     case); skipped when unprivileged so tests on user-owned temp files
+        //     still exercise the path.
+        // On any failure we refuse the file write; the entry still reaches syslog.
+        use std::os::unix::fs::MetadataExt;
+        let meta = file
+            .metadata()
+            .with_context(|| format!("cannot fstat log file {}", self.log_path))?;
+        if !meta.is_file() {
+            anyhow::bail!(
+                "log file {} is not a regular file — refusing to write",
+                self.log_path
+            );
+        }
+        if meta.nlink() != 1 {
+            anyhow::bail!(
+                "log file {} has {} hard links (expected 1) — refusing to write",
+                self.log_path,
+                meta.nlink()
+            );
+        }
+        if unsafe { libc::geteuid() } == 0 && meta.uid() != 0 {
+            anyhow::bail!(
+                "log file {} must be owned by root (uid 0), found uid {} — refusing to write",
+                self.log_path,
+                meta.uid()
+            );
+        }
+
         writeln!(file, "{json}").with_context(|| format!("cannot write to {}", self.log_path))?;
         Ok(())
     }
@@ -187,6 +222,18 @@ mod tests {
         ));
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert!(content.contains("\"outcome\":\"success\""));
+    }
+
+    #[test]
+    fn test_log_refuses_hardlinked_file() {
+        // A pre-existing file with >1 hard link is rejected (finding 4): an
+        // attacker-planted hardlink to a sensitive file must not be appended to.
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("mom.log");
+        std::fs::write(&primary, b"").unwrap();
+        std::fs::hard_link(&primary, dir.path().join("mom.log.link")).unwrap();
+        let logger = AuditLogger::new(primary.to_str().unwrap());
+        assert!(logger.write_to_file("{}").is_err());
     }
 
     #[test]

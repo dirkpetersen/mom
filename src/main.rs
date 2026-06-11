@@ -33,7 +33,7 @@ struct Cli {
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
 
-    /// Skip recommended/optional dependencies (apt-get --no-install-recommends / dnf --no-deps)
+    /// Skip recommended/optional dependencies (apt-get --no-install-recommends / dnf --setopt=install_weak_deps=False)
     #[arg(long = "no-recommends", global = true)]
     no_recommends: bool,
 
@@ -205,6 +205,42 @@ fn run() -> Result<()> {
             )?;
 
             let pm = detect::detect_package_manager()?;
+
+            // SECURITY: On apt, the package-name validator's allowed characters
+            // (`.`, `+`, `-`) collide with apt-get install's argument semantics:
+            // a `.` triggers POSIX-regex matching and a trailing `-`/`+` is a
+            // remove/install modifier. Both let a validated literal resolve to a
+            // *different* package than the deny check inspected — bypassing the
+            // deny list (`n.ap` -> nmap) or removing packages (`bash-`). Require
+            // each name to be an exact, real apt package before exec; apt-get
+            // prefers an exact name over either reinterpretation, making the
+            // literal-string deny check authoritative.
+            if pm == detect::PackageManager::Apt {
+                for pkg in &packages {
+                    match exec::apt_package_exists_exact(pkg, &cfg) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let detail = format!(
+                                "package '{pkg}' does not name an exact apt package; \
+                                 regex patterns and install/remove modifiers are not permitted"
+                            );
+                            logger.log(log::Entry::new(
+                                real_uid.as_raw(),
+                                &real_user,
+                                "install",
+                                packages.clone(),
+                                "denied",
+                                Some(detail.clone()),
+                            ));
+                            // Rate-limit like other denied attempts.
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            bail!("{detail}");
+                        }
+                        Err(e) => bail!("could not verify package '{pkg}': {e}"),
+                    }
+                }
+            }
+
             logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
