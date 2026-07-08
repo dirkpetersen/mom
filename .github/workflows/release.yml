@@ -15,6 +15,12 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # audit-check creates a check run to report warning-level advisories;
+      # without this the action fails with "Resource not accessible by
+      # integration" whenever a warning exists, blocking the entire release.
+      checks: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
