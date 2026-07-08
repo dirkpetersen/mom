@@ -50,23 +50,33 @@ impl AuditLogger {
     }
 
     /// Write one JSON log entry to the audit file and syslog.
-    /// Logging failures are non-fatal — mom still proceeds.
-    pub fn log(&self, entry: Entry) {
+    /// Returns true if at least one sink (file or syslog) accepted the entry.
+    /// Callers decide whether a total logging failure is fatal: outcome
+    /// entries are best-effort, but pre-exec "initiated" entries must not be
+    /// lost — a privileged operation without any durable audit record defeats
+    /// the audit trail this setuid tool promises.
+    pub fn log(&self, entry: Entry) -> bool {
         let json = match serde_json::to_string(&entry) {
             Ok(j) => j,
             Err(e) => {
                 eprintln!("mom: warning: failed to serialize log entry: {e}");
-                return;
+                return false;
             }
         };
 
         // Write to JSON audit file
-        if let Err(e) = self.write_to_file(&json) {
-            eprintln!("mom: warning: failed to write audit log: {e}");
-        }
+        let file_ok = match self.write_to_file(&json) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("mom: warning: failed to write audit log: {e}");
+                false
+            }
+        };
 
         // Write to syslog
-        self.write_to_syslog(&entry, &json);
+        let syslog_ok = self.write_to_syslog(&entry, &json);
+
+        file_ok || syslog_ok
     }
 
     fn write_to_file(&self, json: &str) -> Result<()> {
@@ -153,7 +163,8 @@ impl AuditLogger {
             .collect()
     }
 
-    fn write_to_syslog(&self, entry: &Entry, json: &str) {
+    /// Returns true if the message was accepted by the local syslog socket.
+    fn write_to_syslog(&self, entry: &Entry, json: &str) -> bool {
         let formatter = Formatter3164 {
             facility: Facility::LOG_AUTH,
             hostname: None,
@@ -174,14 +185,18 @@ impl AuditLogger {
             Self::sanitize_for_syslog(&entry.outcome),
             Self::sanitize_for_syslog(entry.detail.as_deref().unwrap_or("-")),
         );
-        if let Ok(mut writer) = syslog::unix(formatter) {
-            let _ = if entry.outcome == "success" || entry.outcome == "initiated" {
+        let sent = if let Ok(mut writer) = syslog::unix(formatter) {
+            let res = if entry.outcome == "success" || entry.outcome == "initiated" {
                 writer.info(msg)
             } else {
                 writer.warning(msg)
             };
-        }
+            res.is_ok()
+        } else {
+            false
+        };
         let _ = json; // suppress unused warning; json available for future structured syslog
+        sent
     }
 }
 

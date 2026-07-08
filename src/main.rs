@@ -149,14 +149,14 @@ fn run() -> Result<()> {
                 &[],
             )?;
             let pm = detect::detect_package_manager()?;
-            logger.log(log::Entry::new(
+            require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
                 "upgrade",
                 vec![],
                 "initiated",
                 None,
-            ));
+            )))?;
             let rc = exec::upgrade(&pm, cli.yes, &cfg)?;
             log_outcome(&logger, real_uid.as_raw(), &real_user, "upgrade", &[], rc);
             maybe_exit(rc);
@@ -176,14 +176,14 @@ fn run() -> Result<()> {
                 &[],
             )?;
             let pm = detect::detect_package_manager()?;
-            logger.log(log::Entry::new(
+            require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
                 "refresh",
                 vec![],
                 "initiated",
                 None,
-            ));
+            )))?;
             let rc = exec::refresh(&pm, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(&logger, real_uid.as_raw(), &real_user, "refresh", &[], rc);
             maybe_exit(rc);
@@ -206,49 +206,53 @@ fn run() -> Result<()> {
 
             let pm = detect::detect_package_manager()?;
 
-            // SECURITY: On apt, the package-name validator's allowed characters
-            // (`.`, `+`, `-`) collide with apt-get install's argument semantics:
-            // a `.` triggers POSIX-regex matching and a trailing `-`/`+` is a
-            // remove/install modifier. Both let a validated literal resolve to a
-            // *different* package than the deny check inspected — bypassing the
-            // deny list (`n.ap` -> nmap) or removing packages (`bash-`). Require
-            // each name to be an exact, real apt package before exec; apt-get
-            // prefers an exact name over either reinterpretation, making the
-            // literal-string deny check authoritative.
-            if pm == detect::PackageManager::Apt {
-                for pkg in &packages {
-                    match exec::apt_package_exists_exact(pkg, &cfg) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let detail = format!(
-                                "package '{pkg}' does not name an exact apt package; \
-                                 regex patterns and install/remove modifiers are not permitted"
-                            );
-                            logger.log(log::Entry::new(
-                                real_uid.as_raw(),
-                                &real_user,
-                                "install",
-                                packages.clone(),
-                                "denied",
-                                Some(detail.clone()),
-                            ));
-                            // Rate-limit like other denied attempts.
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            bail!("{detail}");
-                        }
-                        Err(e) => bail!("could not verify package '{pkg}': {e}"),
+            // SECURITY: The package-name validator's allowed characters
+            // (`.`, `+`, `-`) collide with the package managers' argument
+            // semantics. On apt, a `.` triggers POSIX-regex matching and a
+            // trailing `-`/`+` is a remove/install modifier (`n.ap` -> nmap,
+            // `bash-` removes bash). On dnf, `name.arch` specs resolve to a
+            // different name (`hydra.x86_64` -> hydra). All of these let a
+            // validated literal resolve to a package the deny check never saw.
+            // Require each name to be an exact, real package before exec —
+            // both managers prefer an exact name over any reinterpretation,
+            // making the literal-string deny check authoritative.
+            for pkg in &packages {
+                let exists = match pm {
+                    detect::PackageManager::Apt => exec::apt_package_exists_exact(pkg, &cfg),
+                    detect::PackageManager::Dnf => exec::dnf_package_exists_exact(pkg, &cfg),
+                };
+                match exists {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let detail = format!(
+                            "package '{pkg}' does not name an exact package; \
+                             regex patterns, arch suffixes, and install/remove \
+                             modifiers are not permitted"
+                        );
+                        logger.log(log::Entry::new(
+                            real_uid.as_raw(),
+                            &real_user,
+                            "install",
+                            packages.clone(),
+                            "denied",
+                            Some(detail.clone()),
+                        ));
+                        // Rate-limit like other denied attempts.
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        bail!("{detail}");
                     }
+                    Err(e) => bail!("could not verify package '{pkg}': {e}"),
                 }
             }
 
-            logger.log(log::Entry::new(
+            require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
                 "install",
                 packages.clone(),
                 "initiated",
                 None,
-            ));
+            )))?;
             let rc = exec::install(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(
                 &logger,
@@ -298,14 +302,14 @@ fn run() -> Result<()> {
                 }
             }
 
-            logger.log(log::Entry::new(
+            require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
                 "update",
                 packages.clone(),
                 "initiated",
                 None,
-            ));
+            )))?;
             let rc = exec::update(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
             log_outcome(
                 &logger,
@@ -322,6 +326,20 @@ fn run() -> Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// SECURITY: A privileged operation must not proceed without a durable audit
+/// record. Outcome/denial entries stay best-effort (we are already refusing or
+/// have already acted), but if neither the log file nor syslog accepted the
+/// pre-exec "initiated" entry, refuse to run the operation.
+fn require_audit_log(logged: bool) -> Result<()> {
+    if !logged {
+        bail!(
+            "audit logging unavailable (both log file and syslog failed) — \
+             refusing to run privileged operation"
+        );
+    }
+    Ok(())
+}
 
 fn require_group_membership(
     real_uid: nix::unistd::Uid,

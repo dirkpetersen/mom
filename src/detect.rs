@@ -96,7 +96,16 @@ impl PackageManager {
                 "-f=${db:Status-Abbrev}".to_string(),
                 package.to_string(),
             ],
-            PackageManager::Dnf => vec!["-q".to_string(), package.to_string()],
+            // Print the resolved package NAME so the caller can require it to
+            // equal the literal argument. `rpm -q` accepts spec forms like
+            // `name.arch` (hydra.x86_64), which would let 'mom update' operate
+            // on a package the deny check never saw.
+            PackageManager::Dnf => vec![
+                "-q".to_string(),
+                "--qf".to_string(),
+                "%{NAME}\n".to_string(),
+                package.to_string(),
+            ],
         }
     }
 
@@ -273,7 +282,7 @@ mod tests {
     fn test_dnf_is_installed_args() {
         let pm = PackageManager::Dnf;
         let args = pm.is_installed_cmd_args("curl");
-        assert_eq!(args, vec!["-q", "curl"]);
+        assert_eq!(args, vec!["-q", "--qf", "%{NAME}\n", "curl"]);
     }
 
     #[test]

@@ -73,17 +73,24 @@ pub fn refresh(pm: &PackageManager, _yes: bool, _no_recommends: bool, cfg: &Conf
 /// Debian: `dpkg-query -W -f='${db:Status-Abbrev}' <pkg>` — exits 0 and outputs
 ///         "ii " for installed, "rc " for config-files (removed but not purged).
 ///         We require "ii " to distinguish truly installed packages.
-/// RHEL:   `rpm -q <pkg>` exits 0 if installed.
+/// RHEL:   `rpm -q --qf '%{NAME}\n' <pkg>` — exits 0 if installed. We further
+///         require a resolved NAME to equal the literal argument, because rpm
+///         accepts spec forms like `name.arch` (hydra.x86_64) that would let
+///         'mom update' act on a package the literal deny check never saw.
 pub fn is_installed(pm: &PackageManager, package: &str, cfg: &Config) -> Result<bool> {
     let args = pm.is_installed_cmd_args(package);
-    if *pm == PackageManager::Apt {
-        // Single execution: capture output and check both exit code and status prefix.
-        let env = build_env(cfg);
-        let (rc, output) = run_capture(pm.is_installed_binary(), &args, &env, 64)?;
-        Ok(rc == 0 && output.starts_with("ii"))
-    } else {
-        let rc = run_pkg_cmd_silent(pm.is_installed_binary(), &args, cfg)?;
-        Ok(rc == 0)
+    let env = build_env(cfg);
+    match pm {
+        PackageManager::Apt => {
+            // Single execution: capture output and check both exit code and status prefix.
+            let (rc, output) = run_capture(pm.is_installed_binary(), &args, &env, 64)?;
+            Ok(rc == 0 && output.starts_with("ii"))
+        }
+        PackageManager::Dnf => {
+            // 64 KiB cap: multiarch installs print one NAME per line.
+            let (rc, output) = run_capture(pm.is_installed_binary(), &args, &env, 64 * 1024)?;
+            Ok(rc == 0 && any_line_equals(&output, package))
+        }
     }
 }
 
@@ -118,18 +125,39 @@ fn show_output_names_exact(output: &str, package: &str) -> bool {
         .any(|name| name.trim() == package)
 }
 
+/// Confirm that `package` names an *exact* package known to dnf.
+///
+/// dnf/rpm accept the `name.arch` spec form (`hydra.x86_64` resolves to
+/// `hydra`), and the package-name validator permits `.`, so without this check
+/// a `mom`-group user could smuggle a denied package past the literal deny
+/// match on RHEL-family systems. `dnf repoquery --qf '%{name}'` resolves the
+/// spec the same way `dnf install` would; requiring a resolved NAME to equal
+/// the literal argument rejects arch-suffix (and any other spec) forms while
+/// still allowing legitimate dotted names like `python3.11`.
+pub fn dnf_package_exists_exact(package: &str, cfg: &Config) -> Result<bool> {
+    let env = build_env(cfg);
+    let args = vec![
+        "-q".to_string(),
+        "repoquery".to_string(),
+        "--qf".to_string(),
+        "%{name}\n".to_string(),
+        package.to_string(),
+    ];
+    let (_rc, output) = run_capture(PackageManager::Dnf.binary(), &args, &env, 256 * 1024)?;
+    Ok(any_line_equals(&output, package))
+}
+
+/// Return true if any trimmed line of `output` equals `package` exactly.
+fn any_line_equals(output: &str, package: &str) -> bool {
+    output.lines().any(|line| line.trim() == package)
+}
+
 /// Fork and exec `binary` with `args`, forwarding stdin/stdout/stderr to the
 /// caller's terminal. Signals (SIGINT, SIGTERM, SIGHUP) are forwarded to the
 /// child. Returns the child's exit code.
 fn run_pkg_cmd(binary: &str, args: &[String], cfg: &Config) -> Result<i32> {
     let env = build_env(cfg);
     run_execve(binary, args, &env, false)
-}
-
-/// Like `run_pkg_cmd` but suppresses stdout/stderr (used for `is_installed` checks).
-fn run_pkg_cmd_silent(binary: &str, args: &[String], cfg: &Config) -> Result<i32> {
-    let env = build_env(cfg);
-    run_execve(binary, args, &env, true)
 }
 
 /// Run a command and capture its stdout (for parsing output like dpkg-query
@@ -472,6 +500,35 @@ mod tests {
     #[test]
     fn test_show_output_empty_rejected() {
         assert!(!show_output_names_exact("", "anything"));
+    }
+
+    #[test]
+    fn test_dnf_arch_suffix_rejected() {
+        // `hydra.x86_64` resolves to NAME `hydra`; the literal must NOT be
+        // accepted as an exact package (dnf deny-list bypass finding).
+        assert!(!any_line_equals("hydra\n", "hydra.x86_64"));
+    }
+
+    #[test]
+    fn test_dnf_exact_name_accepted() {
+        assert!(any_line_equals("hydra\n", "hydra"));
+    }
+
+    #[test]
+    fn test_dnf_legit_dotted_name_accepted() {
+        // `python3.11` is a real RHEL package whose NAME contains a dot.
+        assert!(any_line_equals("python3.11\n", "python3.11"));
+    }
+
+    #[test]
+    fn test_dnf_multiarch_lines_accepted() {
+        // rpm -q on a multiarch install prints one NAME per line.
+        assert!(any_line_equals("curl\ncurl\n", "curl"));
+    }
+
+    #[test]
+    fn test_dnf_empty_output_rejected() {
+        assert!(!any_line_equals("", "anything"));
     }
 
     #[test]
