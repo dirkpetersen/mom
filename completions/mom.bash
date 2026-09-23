@@ -6,8 +6,8 @@ _mom() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="install update refresh"
-    local global_opts="-y --yes --check --version --help"
+    local subcommands="install update upgrade refresh"
+    local global_opts="-y --yes --no-recommends --check --version --help"
 
     # Helper: complete from installed packages (for update subcommand)
     _mom_installed_pkgs() {
@@ -29,7 +29,7 @@ _mom() {
             fi
             return
             ;;
-        refresh)
+        upgrade|refresh)
             return
             ;;
         --check|--version|--help)
@@ -42,7 +42,7 @@ _mom() {
     local i
     for (( i=1; i < cword; i++ )); do
         case "${words[$i]}" in
-            install|update|refresh) subcmd="${words[$i]}"; break ;;
+            install|update|upgrade|refresh) subcmd="${words[$i]}"; break ;;
         esac
     done
 

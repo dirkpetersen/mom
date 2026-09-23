@@ -1,4 +1,4 @@
-.TH MOM 8 "2026-04-15" "mom 0.2.17" "System Manager's Manual"
+.TH MOM 8 "2026-09-22" "mom 0.2.22" "System Manager's Manual"
 .SH NAME
 mom \- Meta Overlay Manager: install packages without root access
 .SH SYNOPSIS
@@ -13,6 +13,10 @@ mom \- Meta Overlay Manager: install packages without root access
 .RB [ \-\-no\-recommends ]
 .B update
 .IR package " [" package "...]"
+.br
+.B mom
+.RB [ \-y ]
+.B upgrade
 .br
 .B mom
 .B refresh
@@ -35,9 +39,11 @@ on RHEL/Rocky Linux systems.
 must be deployed as a setuid-root binary. Only members of the configured
 group (default:
 .BR mom )
-may perform install and update operations. The
+may run it. Every subcommand, including
 .B refresh
-subcommand may be run by any user who can execute the binary.
+and
+.BR \-\-check ,
+requires membership in that group.
 .SH SUBCOMMANDS
 .TP
 .BI "install " "package " "[package...]"
@@ -49,10 +55,13 @@ Refresh the package repository metadata, then update the named packages.
 Each package must already be installed; mom will error out rather than
 silently install an unlisted package.
 .TP
+.B upgrade
+Refresh the package repository metadata, then upgrade all installed
+packages (\fBapt-get upgrade\fR or \fBdnf upgrade\fR).
+.TP
 .B refresh
 Refresh package repository metadata only (\fBapt-get update\fR or
-\fBdnf makecache\fR). No group membership check is performed; any user
-who can execute the binary may run this subcommand.
+\fBdnf makecache\fR).
 .PP
 On Debian/Ubuntu, if a previous dpkg run was interrupted (for example a
 \fBmom install\fR stopped with Ctrl+C), \fBinstall\fR, \fBupdate\fR and
@@ -72,15 +81,16 @@ Skip recommended and optional dependencies. Passed as
 to
 .B apt-get
 and as
-.B \-\-no\-deps
+.B \-\-setopt=install_weak_deps=False
 to
 .BR dnf .
 Useful for minimal installs where disk space or attack surface matters.
 .TP
 .B \-\-check
-Validate the configuration file and deny list without performing any
-package operations. Prints a summary of all checks performed.
-Intended for sysadmin use.
+Validate the configuration file, deny list and binary permissions without
+performing any package operations. Prints a summary of all checks performed.
+Intended for sysadmin use; requires group membership like every other
+operation.
 .TP
 .B \-\-version
 Print the version and exit.
@@ -92,7 +102,7 @@ Print a usage summary and exit.
 reads
 .I /etc/mom/mom.conf
 at startup. If the file does not exist, safe defaults are used.
-The file must be owned by root and must not be world-writable.
+The file must be owned by root and must not be group- or world-writable.
 Format: one
 .BI key " = " value
 pair per line. Lines beginning with
@@ -154,9 +164,9 @@ python3-*
 .fi
 .RE
 .PP
-The deny list file must be owned by root or the configured
+The deny list file must be owned by root, with group root or the configured
 .B mom
-group. It must not be world-writable. If the file does not exist,
+group. It must not be group- or world-writable. If the file does not exist,
 all packages are permitted (subject to other access controls).
 .SH INSTALLATION & SETUP
 .SS "1. Create the mom group"
@@ -168,11 +178,8 @@ groupadd mom
 install -o root -g mom -m 4750 /path/to/mom /usr/bin/mom
 .fi
 .PP
-Or, to allow all users to run
-.BR refresh :
-.nf
-install -o root -g root -m 4755 /path/to/mom /usr/bin/mom
-.fi
+Mode 4755 (owner root:root) also works, but gains nothing: mom still
+requires membership in the configured group for every subcommand.
 .SS "3. Create the configuration directory"
 .nf
 mkdir -p /etc/mom
@@ -231,7 +238,7 @@ The setuid-root binary.
 Configuration file. Must be owned by root.
 .TP
 .I /etc/mom/deny.list
-Package deny list. Must be owned by root or the mom group.
+Package deny list. Must be owned by root (group root or mom).
 .TP
 .I /var/log/mom.log
 JSON audit log.

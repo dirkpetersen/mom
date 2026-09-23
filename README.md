@@ -18,6 +18,7 @@ Allow non-root users to install and update packages on systems where they lack r
 ```bash
 mom install curl wget           # install one or more packages
 mom update curl                 # refresh repos and update a package
+mom upgrade                     # refresh repos and upgrade all installed packages
 mom refresh                     # refresh repo metadata only
 mom --check                     # validate configuration (sysadmin use)
 ```
