@@ -1,4 +1,4 @@
-.TH MOM 8 "2026-09-22" "mom 0.2.22" "System Manager's Manual"
+.TH MOM 8 "2026-09-22" "mom 0.2.23" "System Manager's Manual"
 .SH NAME
 mom \- Meta Overlay Manager: install packages without root access
 .SH SYNOPSIS
@@ -63,10 +63,19 @@ packages (\fBapt-get upgrade\fR or \fBdnf upgrade\fR).
 Refresh package repository metadata only (\fBapt-get update\fR or
 \fBdnf makecache\fR).
 .PP
-On Debian/Ubuntu, if a previous dpkg run was interrupted (for example a
-\fBmom install\fR stopped with Ctrl+C), \fBinstall\fR, \fBupdate\fR and
-\fBupgrade\fR first run \fBdpkg \-\-configure \-a\fR to finish it. This is
+On Debian/Ubuntu, \fBinstall\fR, \fBupdate\fR and \fBupgrade\fR first check
+for packages left in an intermediate state by an interrupted dpkg run (for
+example a \fBmom install\fR stopped with Ctrl+C, or a debconf prompt nobody
+could answer). Half-installed packages are unpacked again with
+\fBapt-get install \-\-reinstall\fR; these and any packages merely awaiting
+configuration are then finished with \fBdpkg \-\-configure \-a\fR. This is
 logged as a separate \fIrepair\fR operation.
+.PP
+Repair never reinstalls a package whose interrupted operation was a removal
+or purge, and it applies the deny list to every broken package name before
+touching it. Either case refuses the caller's entire operation with a message
+to contact the system administrator, rather than silently completing or
+reversing work outside what the caller asked for.
 .SH OPTIONS
 .TP
 .BR \-y ", " \-\-yes
@@ -74,6 +83,9 @@ Suppress interactive prompts. Passed directly to
 .B apt-get
 or
 .BR dnf .
+Also selects non-interactive mode for the package manager itself (see
+.B NON-INTERACTIVE MODE
+below), even when run from a terminal.
 .TP
 .B \-\-no\-recommends
 Skip recommended and optional dependencies. Passed as
@@ -97,6 +109,131 @@ Print the version and exit.
 .TP
 .B \-\-help
 Print a usage summary and exit.
+.SH NON-INTERACTIVE MODE
+mom never lets the caller adjudicate a
+.BR dpkg (1)
+conffile prompt. On every
+.B apt-get
+install, update, upgrade or repair reinstall, and on every
+.B "dpkg \-\-configure \-a"
+mom runs, it passes
+.BR \-\-force\-confdef ,
+.B \-\-force\-confold
+and
+.B \-\-no\-pager
+(as
+.B "\-o Dpkg::Options::="
+options for
+.BR apt-get )
+unconditionally, in
+.B every
+mode, interactive or not. dpkg's conffile prompt offers
+.B Z
+(spawn a root shell) and
+.B D
+(view a diff through a pager, and
+.BR less (1)
+allows
+.B !cmd
+shell escapes) \(em a mom caller is not the system administrator and must
+never be offered either, so existing configuration files (or the package
+default, if unmodified) are always kept automatically. Because mom cannot
+tell a conffile change the admin wants from one they would reject, it always
+keeps what is on disk: the new upstream version is left alongside as
+.I *.dpkg-dist
+(or
+.I *.ucf-dist
+, see below) for the admin to review and merge by hand \(em it never takes
+effect on its own. (
+.B \-\-no\-pager
+requires
+.BR dpkg " " >=\~1.19.2 ,
+which every distribution mom currently packages for already ships; do not
+add an older Debian/Ubuntu release as a packaging target without first
+confirming its dpkg supports the option, or dpkg will refuse to run at all.)
+.PP
+On
+.BR apt-get ,
+mom additionally sets
+.B UCF_FORCE_CONFFOLD=1
+, because
+.BR ucf (1)
+(used by many package postinst scripts to manage files under
+.IR /etc )
+has its own conffile prompt with a "start a new shell" choice that also runs
+a root shell on the caller's terminal; this keeps the existing file instead,
+matching
+.BR \-\-force\-confold .
+It also sets
+.B NEEDRESTART_MODE=l
+so
+.BR needrestart (1)
+only lists services that need restarting and never prompts for, or performs,
+a restart on the caller's behalf \(em this overrides an admin's own
+.B needrestart
+policy for mom-initiated runs specifically: even if the system is configured
+to restart affected services automatically, a service using stale, just-updated
+libraries keeps running its old code until the admin (or a reboot) restarts
+it.
+.PP
+Separately, mom always sets
+.B DEBIAN_FRONTEND
+on
+.BR apt-get :
+.B noninteractive
+whenever
+.B \-y
+is given, or when standard input is not a terminal (scripts, CI, AI agent
+sandboxes), so a debconf prompt nobody can answer never hangs the caller; and
+otherwise (an interactive terminal, no
+.BR \-y )
+.B dialog
+\(em left unset, debconf would use whatever frontend is configured in its own
+database, which may be
+.B Editor
+(runs
+.BR /usr/bin/editor ,
+e.g.\&
+.BR vim (1)
+running
+.B :!sh
+, as root), Web, Gnome or Kde; none of those are safe to hand an unprivileged
+caller.
+.B dialog
+itself falls back to Readline and then Teletype when no dialog program or
+terminal is usable, and neither of those can shell out. In this interactive
+case the caller's
+.B TERM
+value is also validated and passed through to the child so prompts render
+correctly, and the caller may then answer any ordinary (non-conffile)
+debconf question the package being installed or upgraded asks \(em for
+example whether to install a setuid helper, or which device to write a
+bootloader to. This does not allow a shell-out or bypass the deny list, but
+it is package-configuration policy chosen by an authorized user rather than
+the sysadmin; deny specific packages, or use
+.B \-y
+or a non-TTY caller, to avoid it.
+.PP
+In every mode, mom also fixes
+.BR PAGER ,
+.B SYSTEMD_PAGER
+and
+.B MANPAGER
+to
+.BR cat ,
+and sets
+.BR LESSSECURE=1 ,
+so that any helper program which still tries to page output cannot hand the
+caller a shell escape as root. For
+.B apt-get
+specifically, mom also sets
+.BR APT_LISTCHANGES_FRONTEND=none ,
+.B APT_LISTBUGS_FRONTEND=none
+and
+.B DPKG_PAGER=cat
+, since apt-listchanges' default frontend runs a pager as root against the
+caller's terminal and apt-listbugs can launch a browser. No other caller
+environment variable is passed in any mode.
 .SH CONFIGURATION
 .B mom
 reads
@@ -211,6 +348,31 @@ The caller's entire environment is discarded before invoking
 .B apt-get
 or
 .BR dnf .
+The child receives only fixed constants \(em pager/helper-frontend safety
+variables in every mode, plus, on apt, a fixed
+.B DEBIAN_FRONTEND
+(always
+.B noninteractive
+or
+.B dialog ,
+never unset and never caller-derived) \(em and, only on an interactive run, a
+validated caller
+.B TERM
+(see
+.B NON-INTERACTIVE MODE
+above). No other caller environment variable ever reaches the child.
+.IP \(bu 2
+dpkg conffile prompts are never shown to the caller:
+.BR \-\-force\-confdef ,
+.B \-\-force\-confold
+and
+.B \-\-no\-pager
+are passed on every
+.B apt-get
+and
+.B dpkg
+invocation, in every mode, so a caller can never reach dpkg's root-shell
+(\fBZ\fR) or pager-escape (\fBD\fR) conffile prompt options.
 .IP \(bu 2
 Package manager binaries are called via hardcoded absolute paths.
 .IP \(bu 2

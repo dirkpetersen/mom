@@ -1,6 +1,18 @@
 use anyhow::{bail, Result};
 use std::path::Path;
 
+/// dpkg options passed on every dpkg run mom starts, interactive or not
+/// (directly for `dpkg --configure -a`, via `Dpkg::Options` for apt-get).
+///
+/// SECURITY: dpkg's conffile prompt offers `Z` (spawn a root shell) and `D`
+/// (show a diff through a pager, where `less` allows `!cmd`), both on the
+/// caller's terminal and running as root. A mom user is not the sysadmin and
+/// must never adjudicate conffiles: `--force-confdef --force-confold` keep the
+/// admin's modified files (and take the package default for unmodified ones)
+/// without prompting, and `--no-pager` (dpkg >= 1.19.2) stops dpkg from
+/// starting a pager at all.
+pub const DPKG_SAFETY_OPTS: [&str; 3] = ["--force-confdef", "--force-confold", "--no-pager"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PackageManager {
     Apt,
@@ -77,6 +89,34 @@ impl PackageManager {
             args.push("-y".to_string());
         }
         args
+    }
+
+    /// Reinstall packages already known to the package database (used to
+    /// recover packages whose unpack was interrupted). Package names must come
+    /// from the root-owned package database, never from the caller.
+    pub fn reinstall_cmd_args(&self, packages: &[String], yes: bool) -> Vec<String> {
+        let mut args = match self {
+            PackageManager::Apt => vec!["install".to_string(), "--reinstall".to_string()],
+            PackageManager::Dnf => vec!["reinstall".to_string()],
+        };
+        if yes {
+            args.push("-y".to_string());
+        }
+        args.extend_from_slice(packages);
+        args
+    }
+
+    /// `-o Dpkg::Options::=<opt>` for every entry of `DPKG_SAFETY_OPTS`, to
+    /// insert into every apt-get call that can run dpkg (install, upgrade,
+    /// reinstall). Fixed constants only; see `DPKG_SAFETY_OPTS`.
+    pub fn dpkg_safety_args(&self) -> Vec<String> {
+        match self {
+            PackageManager::Apt => DPKG_SAFETY_OPTS
+                .iter()
+                .flat_map(|opt| ["-o".to_string(), format!("Dpkg::Options::={opt}")])
+                .collect(),
+            PackageManager::Dnf => vec![],
+        }
     }
 
     pub fn refresh_cmd_args(&self) -> Vec<String> {
@@ -283,6 +323,36 @@ mod tests {
         let pm = PackageManager::Dnf;
         let args = pm.is_installed_cmd_args("curl");
         assert_eq!(args, vec!["-q", "--qf", "%{NAME}\n", "curl"]);
+    }
+
+    #[test]
+    fn test_apt_reinstall_args() {
+        let pm = PackageManager::Apt;
+        let pkgs = ["libpam-runtime".to_string(), "libc6:amd64".to_string()];
+        assert_eq!(
+            pm.reinstall_cmd_args(&pkgs, false),
+            vec!["install", "--reinstall", "libpam-runtime", "libc6:amd64"]
+        );
+        assert_eq!(
+            pm.reinstall_cmd_args(&pkgs[..1], true),
+            vec!["install", "--reinstall", "-y", "libpam-runtime"]
+        );
+    }
+
+    #[test]
+    fn test_dpkg_safety_args() {
+        assert_eq!(
+            PackageManager::Apt.dpkg_safety_args(),
+            vec![
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+                "-o",
+                "Dpkg::Options::=--no-pager"
+            ]
+        );
+        assert!(PackageManager::Dnf.dpkg_safety_args().is_empty());
     }
 
     #[test]

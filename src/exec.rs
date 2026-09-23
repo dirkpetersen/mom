@@ -8,7 +8,7 @@ use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::config::Config;
-use crate::detect::PackageManager;
+use crate::detect::{PackageManager, DPKG_SAFETY_OPTS};
 
 /// PID of the child process; used by signal handlers to forward signals.
 static CHILD_PID: AtomicI32 = AtomicI32::new(-1);
@@ -22,16 +22,91 @@ extern "C" fn forward_signal(sig: libc::c_int) {
     }
 }
 
+/// How the package manager may interact with the caller's terminal.
+///
+/// mom clears its whole environment, so without this TERM is unset and
+/// debconf falls back to its Readline frontend. A caller without a TTY (a
+/// script or AI agent) can then hang on a prompt or get killed mid-dpkg,
+/// leaving packages half-installed for everyone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interaction {
+    /// No usable terminal (or `-y`): set DEBIAN_FRONTEND=noninteractive.
+    /// Conffile prompts are suppressed in every mode (`DPKG_SAFETY_OPTS`).
+    noninteractive: bool,
+    /// Caller's TERM, validated by `is_valid_term`; only set when interactive.
+    term: Option<String>,
+}
+
+impl Interaction {
+    /// True if no one can answer prompts (`-y` or no TTY on stdin).
+    pub fn noninteractive(&self) -> bool {
+        self.noninteractive
+    }
+
+    pub fn new(yes: bool, stdin_is_tty: bool, term: Option<String>) -> Self {
+        let noninteractive = yes || !stdin_is_tty;
+        Interaction {
+            noninteractive,
+            // Re-validate here so no unchecked value can reach the child env.
+            term: term.filter(|t| !noninteractive && is_valid_term(t)),
+        }
+    }
+}
+
+/// True if stdin is a terminal.
+pub fn stdin_is_tty() -> bool {
+    // SAFETY: isatty(3) only inspects the fd.
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+}
+
+/// Maximum accepted length of the caller's TERM value.
+const MAX_TERM_LEN: usize = 64;
+
+/// Validate a caller-supplied TERM value: `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`.
+///
+/// SECURITY: TERM is the only caller environment variable that reaches the
+/// child. ncurses/terminfo treat a TERM containing `/` as a path, so the
+/// charset excludes `/` (and everything else that could form a path or
+/// escape sequence); the value is only used to look up a system terminfo entry.
+pub fn is_valid_term(term: &str) -> bool {
+    let bytes = term.as_bytes();
+    match bytes.first() {
+        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    bytes.len() <= MAX_TERM_LEN
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-'))
+}
+
+/// Validate a raw TERM value captured from the caller's environment.
+/// Non-UTF-8 or invalid values are dropped.
+pub fn sanitize_term(raw: Option<std::ffi::OsString>) -> Option<String> {
+    raw.and_then(|v| v.into_string().ok())
+        .filter(|t| is_valid_term(t))
+}
+
+/// Insert the dpkg safety options (`DPKG_SAFETY_OPTS`) right after the
+/// subcommand. Applied in every mode, interactive or not.
+fn with_dpkg_safety_args(pm: &PackageManager, mut args: Vec<String>) -> Vec<String> {
+    if !args.is_empty() {
+        args.splice(1..1, pm.dpkg_safety_args());
+    }
+    args
+}
+
 /// Run `apt-get install [packages]` or `dnf install [packages]`.
 pub fn install(
     pm: &PackageManager,
     packages: &[String],
     yes: bool,
     no_recommends: bool,
+    ui: &Interaction,
     cfg: &Config,
 ) -> Result<i32> {
-    let args = pm.install_cmd_args(packages, yes, no_recommends);
-    run_pkg_cmd(pm.binary(), &args, cfg)
+    let args = with_dpkg_safety_args(pm, pm.install_cmd_args(packages, yes, no_recommends));
+    run_pkg_cmd(pm.binary(), &args, &pkg_env(cfg, pm, ui))
 }
 
 /// Refresh repos, then run `apt-get install --only-upgrade` / `dnf upgrade`.
@@ -40,32 +115,47 @@ pub fn update(
     packages: &[String],
     yes: bool,
     no_recommends: bool,
+    ui: &Interaction,
     cfg: &Config,
 ) -> Result<i32> {
     // Step 1: refresh
-    let rc = refresh(pm, yes, no_recommends, cfg)?;
+    let rc = refresh(pm, ui, cfg)?;
     if rc != 0 {
         return Ok(rc);
     }
     // Step 2: upgrade
-    let args = pm.update_cmd_args(packages, yes, no_recommends);
-    run_pkg_cmd(pm.binary(), &args, cfg)
+    let args = with_dpkg_safety_args(pm, pm.update_cmd_args(packages, yes, no_recommends));
+    run_pkg_cmd(pm.binary(), &args, &pkg_env(cfg, pm, ui))
 }
 
 /// Run `apt-get update && apt-get upgrade` / `dnf upgrade` (full system upgrade).
-pub fn upgrade(pm: &PackageManager, yes: bool, cfg: &Config) -> Result<i32> {
-    let rc = refresh(pm, yes, false, cfg)?;
+pub fn upgrade(pm: &PackageManager, yes: bool, ui: &Interaction, cfg: &Config) -> Result<i32> {
+    let rc = refresh(pm, ui, cfg)?;
     if rc != 0 {
         return Ok(rc);
     }
-    let args = pm.upgrade_cmd_args(yes);
-    run_pkg_cmd(pm.binary(), &args, cfg)
+    let args = with_dpkg_safety_args(pm, pm.upgrade_cmd_args(yes));
+    run_pkg_cmd(pm.binary(), &args, &pkg_env(cfg, pm, ui))
 }
 
 /// Run `apt-get update` / `dnf makecache`.
-pub fn refresh(pm: &PackageManager, _yes: bool, _no_recommends: bool, cfg: &Config) -> Result<i32> {
+pub fn refresh(pm: &PackageManager, ui: &Interaction, cfg: &Config) -> Result<i32> {
     let args = pm.refresh_cmd_args();
-    run_pkg_cmd(pm.binary(), &args, cfg)
+    run_pkg_cmd(pm.binary(), &args, &pkg_env(cfg, pm, ui))
+}
+
+/// Run `apt-get install --reinstall <packages>` to unpack half-installed
+/// packages again. `packages` must come from `dpkg_broken_packages`, never
+/// from the caller.
+pub fn apt_reinstall(
+    packages: &[String],
+    yes: bool,
+    ui: &Interaction,
+    cfg: &Config,
+) -> Result<i32> {
+    let pm = PackageManager::Apt;
+    let args = with_dpkg_safety_args(&pm, pm.reinstall_cmd_args(packages, yes));
+    run_pkg_cmd(pm.binary(), &args, &pkg_env(cfg, &pm, ui))
 }
 
 /// Directory dpkg uses as its journal of in-progress status updates.
@@ -93,9 +183,148 @@ fn dpkg_interrupted_in(dir: &std::path::Path) -> bool {
 
 /// Run `dpkg --configure -a` to finish an interrupted dpkg run. Takes no
 /// caller input and only configures packages already unpacked on the system.
-pub fn dpkg_configure_pending(cfg: &Config) -> Result<i32> {
-    let args = vec!["--configure".to_string(), "-a".to_string()];
-    run_pkg_cmd("/usr/bin/dpkg", &args, cfg)
+pub fn dpkg_configure_pending(ui: &Interaction, cfg: &Config) -> Result<i32> {
+    // SECURITY: DPKG_SAFETY_OPTS in every mode (no conffile prompt, no
+    // pager); dpkg takes these general options before the action.
+    let mut args: Vec<String> = DPKG_SAFETY_OPTS.iter().map(|o| o.to_string()).collect();
+    args.push("--configure".to_string());
+    args.push("-a".to_string());
+    run_pkg_cmd(
+        "/usr/bin/dpkg",
+        &args,
+        &pkg_env(cfg, &PackageManager::Apt, ui),
+    )
+}
+
+/// Output cap for the full dpkg status listing. A large system lists tens of
+/// thousands of packages at well under 100 bytes each; 16 MiB is far beyond
+/// that while still bounding memory.
+const DPKG_STATUS_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Packages whose dpkg status shows an interrupted install, as reported by
+/// the root-owned dpkg database.
+#[derive(Debug, Default, PartialEq)]
+pub struct DpkgBroken {
+    /// Status `H` (half-installed) or reinst-required flag `R`: the unpack was
+    /// interrupted and the package must be unpacked again (`apt-get install
+    /// --reinstall`). `dpkg --configure -a` cannot fix these.
+    pub reinstall: Vec<String>,
+    /// Status `U` (unpacked), `F` (half-configured), `W` (triggers-awaited) or
+    /// `t` (triggers-pending): finished by `dpkg --configure -a`.
+    pub configure: Vec<String>,
+    /// Broken entries mom will not repair automatically: a name outside the
+    /// strict charset, or a half-installed package whose selection is not
+    /// install/hold (e.g. an interrupted removal). Escaped for display.
+    pub unrepairable: Vec<String>,
+}
+
+impl DpkgBroken {
+    pub fn is_empty(&self) -> bool {
+        self.reinstall.is_empty() && self.configure.is_empty() && self.unrepairable.is_empty()
+    }
+}
+
+/// Query dpkg for packages left in an intermediate state by an interrupted run.
+pub fn dpkg_broken_packages(cfg: &Config) -> Result<DpkgBroken> {
+    let args = vec!["-W".to_string(), format!("-f={DPKG_STATUS_FORMAT}")];
+    let (rc, output, truncated) = run_capture_full(
+        "/usr/bin/dpkg-query",
+        &args,
+        &build_env(cfg),
+        DPKG_STATUS_MAX_BYTES,
+    )?;
+    if rc != 0 {
+        anyhow::bail!("dpkg-query exited with code {rc}");
+    }
+    // A truncated listing could end in a partial name that happens to be a
+    // different, valid package name — never act on it.
+    if truncated {
+        anyhow::bail!("dpkg status listing exceeds {DPKG_STATUS_MAX_BYTES} bytes");
+    }
+    Ok(parse_dpkg_status(&output))
+}
+
+/// dpkg-query format: 3-char status abbreviation, `|`, package name. `|` can
+/// appear in neither field, so each line splits unambiguously even though the
+/// abbreviation's third (error-flag) character is normally a space.
+const DPKG_STATUS_FORMAT: &str = "${db:Status-Abbrev}|${binary:Package}\\n";
+
+/// Parse `DPKG_STATUS_FORMAT` output. `${db:Status-Abbrev}` is exactly three
+/// characters: selection (`u`nknown, `i`nstall, `h`old, `r`emove, `p`urge),
+/// status (`n`ot-installed, `c`onfig-files, `H`alf-installed, `U`npacked,
+/// half-con`F`igured, triggers-a`W`aited, triggers-pending `t`, `i`nstalled),
+/// and error flag (space, or `R` for reinst-required). Malformed lines and
+/// unknown status letters are ignored — the operation then fails in apt as it
+/// would have without mom's repair step.
+fn parse_dpkg_status(output: &str) -> DpkgBroken {
+    let mut broken = DpkgBroken::default();
+    for line in output.lines() {
+        let Some((abbrev, name)) = line.split_once('|') else {
+            continue;
+        };
+        let &[want, status, eflag] = abbrev.as_bytes() else {
+            continue;
+        };
+        let needs_reinstall = status == b'H' || eflag == b'R';
+        let needs_configure = matches!(status, b'U' | b'F' | b'W' | b't');
+        if !needs_reinstall && !needs_configure {
+            continue;
+        }
+        if !is_valid_dpkg_name(name) {
+            broken.unrepairable.push(name.escape_debug().to_string());
+        } else if needs_reinstall {
+            // Only reinstall what the admin (or an earlier mom run) selected
+            // for installation. `apt-get install` on a package whose
+            // interrupted operation was a removal/purge would reverse that
+            // decision.
+            if matches!(want, b'i' | b'h') {
+                broken.reinstall.push(name.to_string());
+            } else {
+                broken.unrepairable.push(name.to_string());
+            }
+        } else {
+            broken.configure.push(name.to_string());
+        }
+    }
+    broken
+}
+
+/// Maximum length of the `:arch` qualifier on a dpkg package name.
+const MAX_ARCH_LEN: usize = 32;
+
+/// Validate a package name reported by dpkg before it is placed in apt-get's
+/// argv.
+///
+/// SECURITY: `${binary:Package}` appends `:<arch>` for Multi-Arch: same
+/// packages (e.g. `libc6:amd64`) — on a typical system many libraries — so
+/// rejecting `:` would leave the most common half-installed packages
+/// unrepairable. We therefore allow exactly one `:arch` suffix, where the name
+/// part must satisfy the caller-input rule (`is_valid_package_name`, length
+/// limit) and the arch part must match `^[a-z0-9][a-z0-9-]*$` (Debian
+/// architecture names, e.g. `amd64`, `i386`, `hurd-i386`). Neither part can
+/// start with `-`, so the result can never be read as an option; apt resolves
+/// `name:arch` as an exact package/architecture pair, and since the package is
+/// in the dpkg database the exact name wins over apt's regex and trailing
+/// `+`/`-` modifier interpretations.
+fn is_valid_dpkg_name(name: &str) -> bool {
+    let (pkg, arch) = match name.split_once(':') {
+        Some((pkg, arch)) => (pkg, Some(arch)),
+        None => (name, None),
+    };
+    if pkg.len() > crate::MAX_PACKAGE_NAME_LEN || !crate::is_valid_package_name(pkg) {
+        return false;
+    }
+    match arch {
+        None => true,
+        Some(arch) => {
+            let bytes = arch.as_bytes();
+            matches!(bytes.first(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+                && bytes.len() <= MAX_ARCH_LEN
+                && bytes
+                    .iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        }
+    }
 }
 
 /// Check whether a package is currently installed.
@@ -185,9 +414,8 @@ fn any_line_equals(output: &str, package: &str) -> bool {
 /// Fork and exec `binary` with `args`, forwarding stdin/stdout/stderr to the
 /// caller's terminal. Signals (SIGINT, SIGTERM, SIGHUP) are forwarded to the
 /// child. Returns the child's exit code.
-fn run_pkg_cmd(binary: &str, args: &[String], cfg: &Config) -> Result<i32> {
-    let env = build_env(cfg);
-    run_execve(binary, args, &env, false)
+fn run_pkg_cmd(binary: &str, args: &[String], env: &[String]) -> Result<i32> {
+    run_execve(binary, args, env, false)
 }
 
 /// Run a command and capture its stdout (for parsing output like dpkg-query
@@ -201,6 +429,18 @@ fn run_capture(
     env: &[String],
     max_bytes: usize,
 ) -> Result<(i32, String)> {
+    let (rc, output, _truncated) = run_capture_full(binary, args, env, max_bytes)?;
+    Ok((rc, output))
+}
+
+/// Like `run_capture`, but also reports whether output was truncated at
+/// `max_bytes`, for callers that must not act on a partial listing.
+fn run_capture_full(
+    binary: &str,
+    args: &[String],
+    env: &[String],
+    max_bytes: usize,
+) -> Result<(i32, String, bool)> {
     let c_binary = CString::new(binary).context("binary path contains null byte")?;
     let mut c_args: Vec<CString> = Vec::with_capacity(args.len() + 1);
     c_args.push(c_binary.clone());
@@ -259,14 +499,16 @@ fn run_capture(
             use std::io::Read;
             let mut buf: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 4096];
+            let mut truncated = false;
             loop {
                 match file.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if buf.len() < max_bytes {
-                            let room = max_bytes - buf.len();
-                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                        let room = max_bytes - buf.len();
+                        if n > room {
+                            truncated = true;
                         }
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
                         // bytes beyond the cap are read and discarded to drain
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -283,7 +525,7 @@ fn run_capture(
                 }
             };
             let output = String::from_utf8_lossy(&buf).trim().to_string();
-            Ok((exit_code, output))
+            Ok((exit_code, output, truncated))
         }
     }
 }
@@ -419,6 +661,73 @@ fn build_env(cfg: &Config) -> Vec<String> {
     env
 }
 
+/// Fixed variables for every package-manager run, in every mode.
+///
+/// SECURITY: package-manager runs share the caller's terminal while running as
+/// root, so any helper that starts a pager or other interactive program hands
+/// the caller a root shell (`less` allows `!cmd`). apt-listchanges' default
+/// pager frontend runs sensible-pager as root and reopens /dev/tty even when
+/// stdin is not a TTY; apt-listbugs can launch a browser. Disable both, point
+/// every pager variable at `cat`, and set LESSSECURE=1 so a `less` that still
+/// runs has shell escapes disabled. debconf stays interactive on a TTY, but
+/// pinned to a frontend without shell-out (see `pkg_env`).
+const PAGER_SAFETY_ENV: [&str; 4] = [
+    "PAGER=cat",
+    "SYSTEMD_PAGER=cat",
+    "LESSSECURE=1",
+    "MANPAGER=cat",
+];
+
+/// apt/dpkg-specific additions to `PAGER_SAFETY_ENV`.
+///
+/// SECURITY: ucf (called from many postinsts to manage files in /etc) has its
+/// own conffile prompt, debconf `ucf/changeprompt`, whose "start a new shell"
+/// choice runs `bash </dev/tty >/dev/tty` as root. UCF_FORCE_CONFFOLD=1 makes
+/// ucf keep the existing file without asking, matching `--force-confold` in
+/// `DPKG_SAFETY_OPTS`. NEEDRESTART_MODE=l makes needrestart only list stale
+/// services: it never prompts, and never restarts services on behalf of a mom
+/// user.
+const APT_SAFETY_ENV: [&str; 5] = [
+    "APT_LISTCHANGES_FRONTEND=none",
+    "APT_LISTBUGS_FRONTEND=none",
+    "DPKG_PAGER=cat",
+    "UCF_FORCE_CONFFOLD=1",
+    "NEEDRESTART_MODE=l",
+];
+
+/// Environment for package-manager runs attached to the caller's terminal:
+/// `build_env`, the fixed pager/helper safety variables, and the terminal
+/// handling chosen in `Interaction`.
+///
+/// SECURITY: every value is a fixed constant except TERM, the only
+/// caller-derived value, which has passed `is_valid_term`; TERMINFO, TERMCAP
+/// and all other terminal variables stay cleared. DEBIAN_FRONTEND is always
+/// set on apt: with it unset, debconf would use the frontend configured in its
+/// database, which may be Editor (runs /usr/bin/editor, e.g. vim `:!sh`, as
+/// root), Web, Gnome or Kde. `dialog` falls back to Readline and then
+/// Teletype when no dialog program or terminal is usable; none of these can
+/// shell out.
+fn pkg_env(cfg: &Config, pm: &PackageManager, ui: &Interaction) -> Vec<String> {
+    let mut env = build_env(cfg);
+    env.extend(PAGER_SAFETY_ENV.iter().map(|v| v.to_string()));
+    if *pm == PackageManager::Apt {
+        env.extend(APT_SAFETY_ENV.iter().map(|v| v.to_string()));
+    }
+    if *pm == PackageManager::Apt {
+        env.push(if ui.noninteractive {
+            "DEBIAN_FRONTEND=noninteractive".to_string()
+        } else {
+            "DEBIAN_FRONTEND=dialog".to_string()
+        });
+    }
+    if !ui.noninteractive {
+        if let Some(term) = ui.term.as_deref().filter(|t| is_valid_term(t)) {
+            env.push(format!("TERM={term}"));
+        }
+    }
+    env
+}
+
 /// Redirect stdout and stderr to /dev/null. Returns false on failure.
 fn redirect_to_devnull() -> bool {
     unsafe {
@@ -450,6 +759,322 @@ mod tests {
         // A numbered journal file means dpkg was interrupted
         std::fs::write(dir.path().join("0001"), "").unwrap();
         assert!(dpkg_interrupted_in(dir.path()));
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_healthy() {
+        // ii (installed) and rc (config-files) need no repair
+        let out = "ii |curl\nrc |oldpkg\nii |libc6:amd64\nun |never-installed\n";
+        assert_eq!(parse_dpkg_status(out), DpkgBroken::default());
+        assert!(parse_dpkg_status(out).is_empty());
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_half_installed() {
+        let out = "ii |curl\niHR|libpam-runtime\niH |libfoo1:amd64\nhH |held-pkg\n";
+        let b = parse_dpkg_status(out);
+        assert_eq!(
+            b.reinstall,
+            names(&["libpam-runtime", "libfoo1:amd64", "held-pkg"])
+        );
+        assert!(b.configure.is_empty());
+        assert!(b.unrepairable.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_reinst_required_flag() {
+        // The R error flag alone (any status) means the package must be reinstalled
+        let b = parse_dpkg_status("iUR|libbar\n");
+        assert_eq!(b.reinstall, names(&["libbar"]));
+        assert!(b.configure.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_configure_states() {
+        let out = "iU |unpacked\niF |halfconf\niW |awaiting:i386\nit |pending\n";
+        let b = parse_dpkg_status(out);
+        assert_eq!(
+            b.configure,
+            names(&["unpacked", "halfconf", "awaiting:i386", "pending"])
+        );
+        assert!(b.reinstall.is_empty());
+        assert!(b.unrepairable.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_interrupted_removal_not_reinstalled() {
+        // Reinstalling would reverse the admin's remove/purge decision
+        let b = parse_dpkg_status("rH |going-away\npHR|purged\nuH |unknown-sel\n");
+        assert!(b.reinstall.is_empty());
+        assert_eq!(
+            b.unrepairable,
+            names(&["going-away", "purged", "unknown-sel"])
+        );
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_malformed_lines_ignored() {
+        let out = "\ngarbage\niH\niHlibfoo\niH  |toolong-abbrev\ni|x\n|\niX |unknown-status\n";
+        assert_eq!(parse_dpkg_status(out), DpkgBroken::default());
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_invalid_names_unrepairable() {
+        let out = "iH |-o\niH |foo:amd64:i386\niH |foo:AMD64\niH |foo:\niH |:amd64\n\
+                   iH |foo bar\niU |evil;rm\niH |\n";
+        let b = parse_dpkg_status(out);
+        assert!(b.reinstall.is_empty());
+        assert!(b.configure.is_empty());
+        assert_eq!(b.unrepairable.len(), 8);
+    }
+
+    #[test]
+    fn test_parse_dpkg_status_unrepairable_escaped() {
+        let b = parse_dpkg_status("iH |x\u{1b}[2J\n");
+        assert_eq!(b.unrepairable, names(&["x\\u{1b}[2J"]));
+    }
+
+    #[test]
+    fn test_valid_dpkg_names() {
+        for name in [
+            "libpam-runtime",
+            "g++",
+            "libc6:amd64",
+            "libc6:i386",
+            "libfoo:hurd-i386",
+            "gir1.2-glib-2.0:arm64",
+        ] {
+            assert!(is_valid_dpkg_name(name), "expected valid: {name}");
+        }
+        let long = "a".repeat(crate::MAX_PACKAGE_NAME_LEN + 1);
+        let long_arch = format!("foo:{}", "a".repeat(MAX_ARCH_LEN + 1));
+        for name in [
+            "",
+            "-foo",
+            "foo:",
+            ":amd64",
+            "foo:-amd64",
+            "foo:amd64:i386",
+            "foo:amd_64",
+            "foo=1.0",
+            "foo/bar",
+            long.as_str(),
+            long_arch.as_str(),
+        ] {
+            assert!(!is_valid_dpkg_name(name), "expected invalid: {name}");
+        }
+    }
+
+    #[test]
+    fn test_valid_terms() {
+        for t in [
+            "xterm-256color",
+            "screen.xterm",
+            "xterm",
+            "vt100",
+            "rxvt-unicode",
+            "st+x_y",
+        ] {
+            assert!(is_valid_term(t), "expected valid: {t}");
+        }
+        assert!(is_valid_term(&"a".repeat(MAX_TERM_LEN)));
+    }
+
+    #[test]
+    fn test_invalid_terms() {
+        let overlong = "a".repeat(MAX_TERM_LEN + 1);
+        for t in [
+            "",
+            "../x",
+            "/usr/share/terminfo/x",
+            "x/y",
+            ".xterm",
+            "-xterm",
+            "xterm\n",
+            "xterm\u{1b}",
+            "xterm\0",
+            "xterm 256",
+            "xterm=1",
+            "xtérm",
+            overlong.as_str(),
+        ] {
+            assert!(!is_valid_term(t), "expected invalid: {t:?}");
+        }
+    }
+
+    #[test]
+    fn test_sanitize_term() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(sanitize_term(None), None);
+        assert_eq!(
+            sanitize_term(Some(OsString::from("xterm-256color"))),
+            Some("xterm-256color".to_string())
+        );
+        assert_eq!(sanitize_term(Some(OsString::from("../x"))), None);
+        assert_eq!(
+            sanitize_term(Some(OsString::from_vec(vec![b'x', 0xff]))),
+            None
+        );
+    }
+
+    #[test]
+    fn test_interaction_modes() {
+        let term = || Some("xterm".to_string());
+        // Interactive TTY, no -y: TERM passed through
+        let ui = Interaction::new(false, true, term());
+        assert!(!ui.noninteractive);
+        assert_eq!(ui.term.as_deref(), Some("xterm"));
+        // -y or no TTY: non-interactive, TERM dropped
+        for ui in [
+            Interaction::new(true, true, term()),
+            Interaction::new(false, false, term()),
+            Interaction::new(true, false, term()),
+        ] {
+            assert!(ui.noninteractive);
+            assert_eq!(ui.term, None);
+        }
+        // Invalid TERM never survives construction
+        let ui = Interaction::new(false, true, Some("/tmp/evil".to_string()));
+        assert_eq!(ui.term, None);
+    }
+
+    #[test]
+    fn test_pkg_env_noninteractive_apt() {
+        let cfg = Config::default();
+        let ui = Interaction::new(true, true, Some("xterm".to_string()));
+        let env = pkg_env(&cfg, &PackageManager::Apt, &ui);
+        assert!(env.iter().any(|e| e == "DEBIAN_FRONTEND=noninteractive"));
+        assert!(!env.iter().any(|e| e == "DEBIAN_FRONTEND=dialog"));
+        assert!(!env.iter().any(|e| e.starts_with("TERM=")));
+        // DEBIAN_FRONTEND is apt-scoped
+        let env = pkg_env(&cfg, &PackageManager::Dnf, &ui);
+        assert!(!env.iter().any(|e| e.starts_with("DEBIAN_FRONTEND=")));
+    }
+
+    #[test]
+    fn test_pkg_env_interactive_term() {
+        let cfg = Config::default();
+        let ui = Interaction::new(false, true, Some("xterm-256color".to_string()));
+        let env = pkg_env(&cfg, &PackageManager::Apt, &ui);
+        assert!(env.iter().any(|e| e == "TERM=xterm-256color"));
+        assert!(!env.iter().any(|e| e.starts_with("TERMINFO")));
+        // debconf pinned to Dialog (never the DB-configured frontend), exactly once
+        let frontends: Vec<_> = env
+            .iter()
+            .filter(|e| e.starts_with("DEBIAN_FRONTEND="))
+            .collect();
+        assert_eq!(frontends, vec!["DEBIAN_FRONTEND=dialog"]);
+        // No TERM captured: none added, frontend still pinned
+        let ui = Interaction::new(false, true, None);
+        let env = pkg_env(&cfg, &PackageManager::Apt, &ui);
+        assert!(!env.iter().any(|e| e.starts_with("TERM=")));
+        assert!(env.iter().any(|e| e == "DEBIAN_FRONTEND=dialog"));
+        // DEBIAN_FRONTEND is apt-scoped
+        let env = pkg_env(&cfg, &PackageManager::Dnf, &ui);
+        assert!(!env.iter().any(|e| e.starts_with("DEBIAN_FRONTEND=")));
+    }
+
+    const SAFETY_ARGV: [&str; 6] = [
+        "-o",
+        "Dpkg::Options::=--force-confdef",
+        "-o",
+        "Dpkg::Options::=--force-confold",
+        "-o",
+        "Dpkg::Options::=--no-pager",
+    ];
+
+    #[test]
+    fn test_dpkg_safety_args_every_apt_call() {
+        // Unconditional: the args do not depend on -y or on a TTY.
+        let pm = PackageManager::Apt;
+        let pkgs = names(&["curl"]);
+        let with = |mut head: Vec<&'static str>, tail: &[&'static str]| -> Vec<String> {
+            head.splice(1..1, SAFETY_ARGV);
+            head.extend_from_slice(tail);
+            head.into_iter().map(String::from).collect()
+        };
+        assert_eq!(
+            with_dpkg_safety_args(&pm, pm.install_cmd_args(&pkgs, false, false)),
+            with(vec!["install"], &["curl"])
+        );
+        assert_eq!(
+            with_dpkg_safety_args(&pm, pm.install_cmd_args(&pkgs, true, false)),
+            with(vec!["install"], &["-y", "curl"])
+        );
+        assert_eq!(
+            with_dpkg_safety_args(&pm, pm.update_cmd_args(&pkgs, false, false)),
+            with(vec!["install"], &["--only-upgrade", "curl"])
+        );
+        assert_eq!(
+            with_dpkg_safety_args(&pm, pm.upgrade_cmd_args(false)),
+            with(vec!["upgrade"], &[])
+        );
+        assert_eq!(
+            with_dpkg_safety_args(&pm, pm.reinstall_cmd_args(&pkgs, false)),
+            with(vec!["install"], &["--reinstall", "curl"])
+        );
+        // dnf gets no extra argv
+        let dnf = PackageManager::Dnf;
+        let args = dnf.install_cmd_args(&pkgs, true, false);
+        assert_eq!(with_dpkg_safety_args(&dnf, args.clone()), args);
+    }
+
+    #[test]
+    fn test_dpkg_safety_opts_for_direct_dpkg() {
+        assert_eq!(
+            DPKG_SAFETY_OPTS,
+            ["--force-confdef", "--force-confold", "--no-pager"]
+        );
+    }
+
+    #[test]
+    fn test_pkg_env_safety_vars_all_modes() {
+        let cfg = Config::default();
+        let modes = [
+            Interaction::new(false, true, Some("xterm".to_string())),
+            Interaction::new(true, true, None),
+            Interaction::new(false, false, None),
+        ];
+        for ui in &modes {
+            let env = pkg_env(&cfg, &PackageManager::Apt, ui);
+            for var in [
+                "APT_LISTCHANGES_FRONTEND=none",
+                "APT_LISTBUGS_FRONTEND=none",
+                "PAGER=cat",
+                "DPKG_PAGER=cat",
+                "SYSTEMD_PAGER=cat",
+                "LESSSECURE=1",
+                "UCF_FORCE_CONFFOLD=1",
+                "NEEDRESTART_MODE=l",
+            ] {
+                assert!(env.iter().any(|e| e == var), "missing {var} in {ui:?}");
+            }
+            let env = pkg_env(&cfg, &PackageManager::Dnf, ui);
+            assert!(env.iter().any(|e| e == "PAGER=cat"));
+            assert!(env.iter().any(|e| e == "LESSSECURE=1"));
+            assert!(!env
+                .iter()
+                .any(|e| e.starts_with("APT_LISTCHANGES_FRONTEND=")));
+            assert!(!env.iter().any(|e| e.starts_with("UCF_FORCE_CONFFOLD=")));
+        }
+    }
+
+    #[test]
+    fn test_run_capture_full_reports_truncation() {
+        if !std::path::Path::new("/usr/bin/echo").exists() {
+            return;
+        }
+        let env = build_env(&Config::default());
+        let args = vec!["hello world".to_string()];
+        let (rc, out, truncated) = run_capture_full("/usr/bin/echo", &args, &env, 5).unwrap();
+        assert_eq!((rc, out.as_str(), truncated), (0, "hello", true));
+        let (_, out, truncated) = run_capture_full("/usr/bin/echo", &args, &env, 1024).unwrap();
+        assert_eq!((out.as_str(), truncated), ("hello world", false));
     }
 
     #[test]
@@ -579,7 +1204,12 @@ mod tests {
     #[test]
     fn test_run_pkg_cmd_missing_binary_exits_127() {
         let cfg = Config::default();
-        let rc = run_pkg_cmd("/nonexistent/binary", &["--version".to_string()], &cfg).unwrap();
+        let rc = run_pkg_cmd(
+            "/nonexistent/binary",
+            &["--version".to_string()],
+            &build_env(&cfg),
+        )
+        .unwrap();
         assert_eq!(rc, 127);
     }
 
@@ -588,7 +1218,7 @@ mod tests {
         // /usr/bin/true always succeeds — use it as a safe smoke test
         let cfg = Config::default();
         if std::path::Path::new("/usr/bin/true").exists() {
-            let rc = run_pkg_cmd("/usr/bin/true", &[], &cfg).unwrap();
+            let rc = run_pkg_cmd("/usr/bin/true", &[], &build_env(&cfg)).unwrap();
             assert_eq!(rc, 0);
         }
     }
@@ -597,7 +1227,7 @@ mod tests {
     fn test_run_pkg_cmd_false_exits_nonzero() {
         let cfg = Config::default();
         if std::path::Path::new("/usr/bin/false").exists() {
-            let rc = run_pkg_cmd("/usr/bin/false", &[], &cfg).unwrap();
+            let rc = run_pkg_cmd("/usr/bin/false", &[], &build_env(&cfg)).unwrap();
             assert_ne!(rc, 0);
         }
     }

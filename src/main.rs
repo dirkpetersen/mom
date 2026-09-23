@@ -66,6 +66,13 @@ enum Commands {
 }
 
 fn main() {
+    // SECURITY: TERM is the one caller variable we keep, captured before the
+    // environment is cleared. It is validated against a strict charset (no
+    // `/`, so it cannot name a terminfo path), passed only to the package
+    // manager child, and only when running interactively on a TTY. Nothing
+    // else is read.
+    let term = exec::sanitize_term(std::env::var_os("TERM"));
+
     // SECURITY: Clear the entire inherited environment immediately, before any
     // Rust stdlib or dependency code can read attacker-controlled env vars
     // (e.g. RUST_LOG, LD_PRELOAD, http_proxy, LANG, LC_*, TERM, HOME, etc.).
@@ -76,7 +83,7 @@ fn main() {
     // are not world-readable/writable by default.
     unsafe { libc::umask(0o077) };
 
-    if let Err(e) = run() {
+    if let Err(e) = run(term) {
         eprintln!("mom: {e}");
         std::process::exit(1);
     }
@@ -89,7 +96,7 @@ fn clear_environment() {
     unsafe { libc::clearenv() };
 }
 
-fn run() -> Result<()> {
+fn run(term: Option<String>) -> Result<()> {
     // ── Capture real identity before any privilege operations ─────────────────
     let real_uid = getuid();
     let real_gid = getgid();
@@ -122,6 +129,10 @@ fn run() -> Result<()> {
     // ── Parse CLI ─────────────────────────────────────────────────────────────
     let cli = Cli::parse();
 
+    // Non-interactive with -y or without a TTY on stdin (scripts, AI agents):
+    // debconf/conffile prompts must not block a root dpkg run.
+    let ui = exec::Interaction::new(cli.yes, exec::stdin_is_tty(), term);
+
     // ── --check overrides all subcommands ────────────────────────────────────
     if cli.check {
         // Require group membership (or root) to prevent config path leakage
@@ -149,7 +160,15 @@ fn run() -> Result<()> {
                 &[],
             )?;
             let pm = detect::detect_package_manager()?;
-            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
+            repair_dpkg_if_interrupted(
+                &pm,
+                &cfg,
+                &logger,
+                real_uid.as_raw(),
+                &real_user,
+                cli.yes,
+                &ui,
+            )?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -158,7 +177,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             )))?;
-            let rc = exec::upgrade(&pm, cli.yes, &cfg)?;
+            let rc = exec::upgrade(&pm, cli.yes, &ui, &cfg)?;
             log_outcome(&logger, real_uid.as_raw(), &real_user, "upgrade", &[], rc);
             maybe_exit(rc);
             Ok(())
@@ -185,7 +204,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             )))?;
-            let rc = exec::refresh(&pm, cli.yes, cli.no_recommends, &cfg)?;
+            let rc = exec::refresh(&pm, &ui, &cfg)?;
             log_outcome(&logger, real_uid.as_raw(), &real_user, "refresh", &[], rc);
             maybe_exit(rc);
             Ok(())
@@ -246,7 +265,15 @@ fn run() -> Result<()> {
                 }
             }
 
-            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
+            repair_dpkg_if_interrupted(
+                &pm,
+                &cfg,
+                &logger,
+                real_uid.as_raw(),
+                &real_user,
+                cli.yes,
+                &ui,
+            )?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -255,7 +282,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             )))?;
-            let rc = exec::install(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
+            let rc = exec::install(&pm, &packages, cli.yes, cli.no_recommends, &ui, &cfg)?;
             log_outcome(
                 &logger,
                 real_uid.as_raw(),
@@ -304,7 +331,15 @@ fn run() -> Result<()> {
                 }
             }
 
-            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
+            repair_dpkg_if_interrupted(
+                &pm,
+                &cfg,
+                &logger,
+                real_uid.as_raw(),
+                &real_user,
+                cli.yes,
+                &ui,
+            )?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -313,7 +348,7 @@ fn run() -> Result<()> {
                 "initiated",
                 None,
             )))?;
-            let rc = exec::update(&pm, &packages, cli.yes, cli.no_recommends, &cfg)?;
+            let rc = exec::update(&pm, &packages, cli.yes, cli.no_recommends, &ui, &cfg)?;
             log_outcome(
                 &logger,
                 real_uid.as_raw(),
@@ -345,40 +380,157 @@ fn require_audit_log(logged: bool) -> Result<()> {
 }
 
 /// If a previous dpkg run was interrupted (e.g. a `mom install` killed with
-/// Ctrl+C), every apt-get call fails until `dpkg --configure -a` runs — which
-/// the caller cannot do without root. Finish the interrupted run first.
+/// Ctrl+C, or a debconf prompt nobody could answer), every apt-get call fails
+/// until the package database is repaired — which the caller cannot do
+/// without root. Repair it first:
 ///
-/// SECURITY: `dpkg --configure -a` takes no caller input and only configures
-/// packages that are already unpacked on the system (by an earlier root dpkg
-/// run), so it does not widen what a caller can install. Only called after
-/// group membership and package validation have passed.
+/// - Half-installed packages (status `H` / reinst-required `R`; the unpack was
+///   interrupted) are unpacked again with `apt-get install --reinstall`, then
+///   `dpkg --configure -a` finishes configuration.
+/// - The dpkg update journal, or packages in `U`/`F`/`W`/`t` (unpacked,
+///   half-configured, awaiting/pending triggers), trigger `dpkg --configure
+///   -a`. apt-get would itself try to configure these as part of the caller's
+///   operation, but it fails outright on the journal and can fail on ordering
+///   (as with a half-installed dependency), so we finish them first.
+///
+/// SECURITY: No caller input reaches these commands. Package names come from
+/// the root-owned dpkg database and are re-validated (`is_valid_dpkg_name`)
+/// before entering argv. Reinstalling or configuring a package does not widen
+/// what a caller can install beyond what root already started — with one
+/// exception: completing an interrupted *first* install (or a configure whose
+/// maintainer scripts grant privileges) of a package the deny list forbids.
+/// Because apt-get would complete those as a side effect of the caller's own
+/// operation, a denied package in any broken state refuses the whole
+/// operation, and the caller is told to contact the sysadmin. Only called
+/// after group membership and package validation have passed.
 fn repair_dpkg_if_interrupted(
     pm: &detect::PackageManager,
     cfg: &config::Config,
     logger: &log::AuditLogger,
     real_uid: u32,
     real_user: &str,
+    yes: bool,
+    ui: &exec::Interaction,
 ) -> Result<()> {
-    if *pm != detect::PackageManager::Apt || !exec::dpkg_interrupted() {
+    if *pm != detect::PackageManager::Apt {
         return Ok(());
     }
-    eprintln!("mom: dpkg was interrupted; running 'dpkg --configure -a' to recover");
+    let journal = exec::dpkg_interrupted();
+    let broken = exec::dpkg_broken_packages(cfg)
+        .map_err(|e| anyhow::anyhow!("could not read the dpkg status database: {e}"))?;
+    if !journal && broken.is_empty() {
+        return Ok(());
+    }
+
+    let affected: Vec<String> = broken
+        .reinstall
+        .iter()
+        .chain(&broken.configure)
+        .chain(&broken.unrepairable)
+        .cloned()
+        .collect();
+    let refuse = |detail: String| -> Result<()> {
+        logger.log(log::Entry::new(
+            real_uid,
+            real_user,
+            "repair",
+            affected.clone(),
+            "denied",
+            Some(detail.clone()),
+        ));
+        // Rate-limit like other denied attempts.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        bail!("{detail}; ask your system administrator to repair the package database");
+    };
+
+    if !broken.unrepairable.is_empty() {
+        return refuse(format!(
+            "dpkg reports interrupted packages mom will not repair automatically: {}",
+            broken.unrepairable.join(", ")
+        ));
+    }
+
+    let group_gid = auth::gid_for_group(&cfg.group).ok();
+    let deny_list = deny::DenyList::load(&cfg.deny_list, group_gid)?;
+    for pkg in broken.reinstall.iter().chain(&broken.configure) {
+        // Match the bare name (`libfoo` of `libfoo:amd64`) as well as the full
+        // name so patterns written for either form apply.
+        let base = pkg.split_once(':').map_or(pkg.as_str(), |(name, _)| name);
+        if let Some(pattern) = deny_list.matches(base).or_else(|| deny_list.matches(pkg)) {
+            return refuse(format!(
+                "interrupted package '{pkg}' matches deny list pattern '{pattern}'"
+            ));
+        }
+    }
+
+    if broken.reinstall.is_empty() {
+        eprintln!("mom: dpkg was interrupted; running 'dpkg --configure -a' to recover");
+    } else {
+        eprintln!(
+            "mom: dpkg was interrupted; reinstalling half-installed package(s) {} \
+             and running 'dpkg --configure -a' to recover",
+            broken.reinstall.join(", ")
+        );
+    }
     require_audit_log(logger.log(log::Entry::new(
         real_uid,
         real_user,
         "repair",
-        vec![],
+        affected.clone(),
         "initiated",
         None,
     )))?;
-    let rc = exec::dpkg_configure_pending(cfg)?;
-    log_outcome(logger, real_uid, real_user, "repair", &[], rc);
-    if rc != 0 {
+
+    let fail = |step: &str, rc: i32| -> Result<()> {
+        log_outcome(logger, real_uid, real_user, "repair", &affected, rc);
         bail!(
-            "'dpkg --configure -a' failed (exit code {rc}); \
+            "{step} failed (exit code {rc}); \
              ask your system administrator to repair the package database"
         );
+    };
+
+    let mut configured = false;
+    if journal {
+        // apt-get refuses to run while the journal exists, so this must come
+        // before the reinstall. dpkg merges the journal even if configuring
+        // fails; with a reinstall pending, dependents of the half-installed
+        // packages may legitimately fail here, and the second pass decides.
+        let rc = exec::dpkg_configure_pending(ui, cfg)?;
+        if rc != 0 {
+            if broken.reinstall.is_empty() {
+                return fail("'dpkg --configure -a'", rc);
+            }
+            // Continuing, but keep the failed pass in the audit trail.
+            logger.log(log::Entry::new(
+                real_uid,
+                real_user,
+                "repair",
+                affected.clone(),
+                "failed",
+                Some(format!(
+                    "'dpkg --configure -a' before reinstall exited with code {rc}; \
+                     continuing with reinstall"
+                )),
+            ));
+        }
+        configured = true;
     }
+    if !broken.reinstall.is_empty() {
+        // The repair is mom's own operation on packages root already chose, so
+        // a caller without a TTY (script, AI agent) must not stall it on apt's
+        // confirmation prompt (apt reads EOF and aborts).
+        let rc = exec::apt_reinstall(&broken.reinstall, yes || ui.noninteractive(), ui, cfg)?;
+        if rc != 0 {
+            return fail("reinstalling half-installed packages", rc);
+        }
+    }
+    if !broken.reinstall.is_empty() || !configured {
+        let rc = exec::dpkg_configure_pending(ui, cfg)?;
+        if rc != 0 {
+            return fail("'dpkg --configure -a'", rc);
+        }
+    }
+    log_outcome(logger, real_uid, real_user, "repair", &affected, 0);
     Ok(())
 }
 

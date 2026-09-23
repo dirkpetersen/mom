@@ -23,7 +23,7 @@ mom refresh                     # refresh repo metadata only
 mom --check                     # validate configuration (sysadmin use)
 ```
 
-Add `-y` to suppress interactive prompts — same semantics as `apt-get -y` and `dnf -y`.
+Add `-y` to suppress interactive prompts — same semantics as `apt-get -y` and `dnf -y`. mom also runs non-interactively on its own whenever stdin isn't a TTY (scripts, CI, AI agents), so a debconf prompt nobody can answer never hangs the process.
 
 ## Why mom?
 
@@ -42,7 +42,11 @@ Research computing teams often support scientists who purchase their own lab ser
 - Install and update packages by name on Debian/Ubuntu and RHEL/Rocky Linux
 - Automatic package manager detection at runtime (`apt-get` vs `dnf`)
 - Package deny list with glob pattern support (`python3-*`, `*-dev`)
-- Full environment sanitization — `LD_PRELOAD`, `PATH`, and all caller env vars are stripped before invoking the package manager
+- Full environment sanitization — `LD_PRELOAD`, `PATH`, and all caller env vars are stripped before invoking the package manager; the child only ever gets fixed constants plus, on an interactive run, a validated `TERM` (see below)
+- dpkg conffile prompts are never shown to the caller — `--force-confdef --force-confold --no-pager` are always passed, in every mode, so a user can never reach dpkg's "spawn a root shell" or "view diff in a pager" prompt options (same fix applied to `ucf`'s own conffile prompt via `UCF_FORCE_CONFFOLD=1`)
+- `DEBIAN_FRONTEND` is always fixed on apt (`noninteractive`, or `dialog` when interactive) so debconf can never fall back to an admin-configured frontend like Editor, Web, Gnome or Kde
+- Automatic recovery from an interrupted dpkg run (half-installed packages reinstalled, `dpkg --configure -a`) before `install`/`update`/`upgrade` on Debian/Ubuntu — still subject to the deny list, and never reverses an interrupted removal
+- Non-interactive by default in scripts, CI, or AI agent sandboxes (no TTY) or with `-y`, so debconf prompts can't hang the process
 - JSON audit log of every operation, including denied attempts
 - Syslog integration (`LOG_AUTH` facility)
 - Proxy support via `/etc/mom/mom.conf`
@@ -177,7 +181,9 @@ mom runs as a **setuid-root binary**. Security measures applied at runtime:
 
 | Mechanism | Details |
 |-----------|---------|
-| Environment sanitization | Caller env is entirely discarded; only `PATH`, `HOME`, `LANG`, and configured proxy are passed to child |
+| Environment sanitization | Caller env is entirely discarded; child gets `PATH`, `HOME`, `LANG`, configured proxy, fixed pager-safety vars (`PAGER=cat`, etc., see below), and (interactive TTY only) a validated `TERM`, or (non-interactive: `-y`/no TTY) a fixed `DEBIAN_FRONTEND=noninteractive` |
+| dpkg conffile safety | `--force-confdef --force-confold --no-pager` on every `apt-get`/`dpkg` call, in every mode — a mom user never adjudicates a conffile prompt (which offers a root shell or a pager with shell escapes) |
+| Pager/helper safety | `PAGER`, `SYSTEMD_PAGER`, `MANPAGER` fixed to `cat`, `LESSSECURE=1`, and (apt) `APT_LISTCHANGES_FRONTEND=none`, `APT_LISTBUGS_FRONTEND=none`, `DPKG_PAGER=cat` — closes root-shell escapes via `less`/apt-listchanges/apt-listbugs |
 | Input validation | Package names validated against `^[a-zA-Z0-9][a-zA-Z0-9.+\-]*$` — no shell metacharacters accepted |
 | Hardcoded binary paths | `/usr/bin/apt-get` and `/usr/bin/dnf` — caller `PATH` never used |
 | No shell | Arguments passed as discrete `execve(2)` argv entries |
