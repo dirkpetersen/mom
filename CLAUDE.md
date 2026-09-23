@@ -10,6 +10,16 @@ The crate is named `mom-inst` (that is also the .deb/.rpm package name); the bin
 
 This tool runs with elevated privileges on behalf of untrusted users. Treat every design and implementation decision as a security-critical choice. `SECURITY.md` holds the threat model; update it when you change the attack surface.
 
+## Agent Workflow (required)
+
+For every change in this repo:
+
+1. **Code**: write all code changes with a background agent running the **Opus** model.
+2. **Security review**: before each commit, have a background agent running the **Fable** model do a security review of the pending diff. Fix what it finds before committing.
+3. **Docs**: once the code is final, have a background agent running the **Sonnet** model update the README, the man page (`doc/mom.8`), the bash completion (`completions/mom.bash`), `SECURITY.md`, this file, and anything else the change affects.
+
+The Fable security review (step 2) and the Sonnet docs update (step 3) can run in parallel.
+
 ## Build & Development Commands
 
 ```bash
