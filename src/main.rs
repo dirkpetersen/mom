@@ -149,6 +149,7 @@ fn run() -> Result<()> {
                 &[],
             )?;
             let pm = detect::detect_package_manager()?;
+            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -245,6 +246,7 @@ fn run() -> Result<()> {
                 }
             }
 
+            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -302,6 +304,7 @@ fn run() -> Result<()> {
                 }
             }
 
+            repair_dpkg_if_interrupted(&pm, &cfg, &logger, real_uid.as_raw(), &real_user)?;
             require_audit_log(logger.log(log::Entry::new(
                 real_uid.as_raw(),
                 &real_user,
@@ -336,6 +339,44 @@ fn require_audit_log(logged: bool) -> Result<()> {
         bail!(
             "audit logging unavailable (both log file and syslog failed) — \
              refusing to run privileged operation"
+        );
+    }
+    Ok(())
+}
+
+/// If a previous dpkg run was interrupted (e.g. a `mom install` killed with
+/// Ctrl+C), every apt-get call fails until `dpkg --configure -a` runs — which
+/// the caller cannot do without root. Finish the interrupted run first.
+///
+/// SECURITY: `dpkg --configure -a` takes no caller input and only configures
+/// packages that are already unpacked on the system (by an earlier root dpkg
+/// run), so it does not widen what a caller can install. Only called after
+/// group membership and package validation have passed.
+fn repair_dpkg_if_interrupted(
+    pm: &detect::PackageManager,
+    cfg: &config::Config,
+    logger: &log::AuditLogger,
+    real_uid: u32,
+    real_user: &str,
+) -> Result<()> {
+    if *pm != detect::PackageManager::Apt || !exec::dpkg_interrupted() {
+        return Ok(());
+    }
+    eprintln!("mom: dpkg was interrupted; running 'dpkg --configure -a' to recover");
+    require_audit_log(logger.log(log::Entry::new(
+        real_uid,
+        real_user,
+        "repair",
+        vec![],
+        "initiated",
+        None,
+    )))?;
+    let rc = exec::dpkg_configure_pending(cfg)?;
+    log_outcome(logger, real_uid, real_user, "repair", &[], rc);
+    if rc != 0 {
+        bail!(
+            "'dpkg --configure -a' failed (exit code {rc}); \
+             ask your system administrator to repair the package database"
         );
     }
     Ok(())

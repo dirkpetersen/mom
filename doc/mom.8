@@ -53,6 +53,11 @@ silently install an unlisted package.
 Refresh package repository metadata only (\fBapt-get update\fR or
 \fBdnf makecache\fR). No group membership check is performed; any user
 who can execute the binary may run this subcommand.
+.PP
+On Debian/Ubuntu, if a previous dpkg run was interrupted (for example a
+\fBmom install\fR stopped with Ctrl+C), \fBinstall\fR, \fBupdate\fR and
+\fBupgrade\fR first run \fBdpkg \-\-configure \-a\fR to finish it. This is
+logged as a separate \fIrepair\fR operation.
 .SH OPTIONS
 .TP
 .BR \-y ", " \-\-yes

@@ -68,6 +68,36 @@ pub fn refresh(pm: &PackageManager, _yes: bool, _no_recommends: bool, cfg: &Conf
     run_pkg_cmd(pm.binary(), &args, cfg)
 }
 
+/// Directory dpkg uses as its journal of in-progress status updates.
+const DPKG_UPDATES_DIR: &str = "/var/lib/dpkg/updates";
+
+/// True if a previous dpkg run was interrupted (e.g. a `mom install` killed
+/// with Ctrl+C). Mirrors apt's own check (`debSystem::CheckUpdates`): any file
+/// in /var/lib/dpkg/updates whose name is all digits. While this holds, every
+/// apt-get operation fails with "dpkg was interrupted, you must manually run
+/// 'dpkg --configure -a'", which a non-root caller cannot do.
+pub fn dpkg_interrupted() -> bool {
+    dpkg_interrupted_in(std::path::Path::new(DPKG_UPDATES_DIR))
+}
+
+fn dpkg_interrupted_in(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let name = e.file_name();
+        let name = name.as_encoded_bytes();
+        !name.is_empty() && name.iter().all(u8::is_ascii_digit)
+    })
+}
+
+/// Run `dpkg --configure -a` to finish an interrupted dpkg run. Takes no
+/// caller input and only configures packages already unpacked on the system.
+pub fn dpkg_configure_pending(cfg: &Config) -> Result<i32> {
+    let args = vec!["--configure".to_string(), "-a".to_string()];
+    run_pkg_cmd("/usr/bin/dpkg", &args, cfg)
+}
+
 /// Check whether a package is currently installed.
 ///
 /// Debian: `dpkg-query -W -f='${db:Status-Abbrev}' <pkg>` — exits 0 and outputs
@@ -406,6 +436,21 @@ fn redirect_to_devnull() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dpkg_interrupted_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing directory: not interrupted
+        assert!(!dpkg_interrupted_in(&dir.path().join("missing")));
+        // Empty directory: not interrupted
+        assert!(!dpkg_interrupted_in(dir.path()));
+        // Non-numeric names (e.g. dpkg's "tmp.i") are ignored, as apt does
+        std::fs::write(dir.path().join("tmp.i"), "").unwrap();
+        assert!(!dpkg_interrupted_in(dir.path()));
+        // A numbered journal file means dpkg was interrupted
+        std::fs::write(dir.path().join("0001"), "").unwrap();
+        assert!(dpkg_interrupted_in(dir.path()));
+    }
 
     #[test]
     fn test_build_env_no_proxy() {
