@@ -4,152 +4,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**mom** (Meta Overlay Manager) is a Rust tool that allows non-root users to install and update packages on systems where they lack root access. It wraps `apt-get` (Debian/Ubuntu) and `dnf` (RHEL) and runs as a **setuid-root binary** with group-restricted execute permissions.
+**mom** (Meta Overlay Manager) is a Rust tool that allows non-root users to install and update packages on systems where they lack root access. It wraps `apt-get` (Debian/Ubuntu) and `dnf` (RHEL/Rocky/Alma/Amazon Linux) and runs as a **setuid-root binary** with group-restricted execute permissions.
 
-This tool runs with elevated privileges on behalf of untrusted users — treat every design and implementation decision as a security-critical choice.
+The crate is named `mom-inst` (that is also the .deb/.rpm package name); the binary is `mom`.
+
+This tool runs with elevated privileges on behalf of untrusted users. Treat every design and implementation decision as a security-critical choice. `SECURITY.md` holds the threat model; update it when you change the attack surface.
 
 ## Build & Development Commands
 
 ```bash
 cargo build                  # debug build
-cargo build --release        # release build
-cargo test                   # run all tests
-cargo test <test_name>       # run a single test
-cargo clippy                 # lint
-cargo fmt                    # format code
-cargo audit                  # check for known vulnerabilities in dependencies
+cargo build --release        # release build (lto, opt-level=z, panic=abort, stripped)
+cargo test                   # run all tests (unit tests live in #[cfg(test)] mod in each src file)
+cargo test <test_name>       # run a single test, e.g. cargo test test_invalid_package_names
+cargo fmt --all -- --check   # CI format check
+cargo clippy --locked --all-targets --all-features -- -D warnings   # CI lint, exactly as run in CI
+cargo audit                  # dependency vulnerability scan
+cargo fuzz run fuzz_package_name   # fuzz targets in fuzz/ (needs cargo-fuzz, nightly)
+cargo fuzz run fuzz_deny_list
 ```
 
-## Target Platforms & Packaging
-
-Packages must be produced for:
-- Debian (latest stable)
-- RHEL 9 and RHEL 10
-- Ubuntu 22.04, 24.04, 26.04
-
-Released as downloadable artifacts from GitHub Releases. Two forms:
-- Single static binary
-- Full package (binary + man page + bash completions + logrotate.d config)
+The binary refuses to run unless its effective UID is 0, so `cargo run` as a normal user only exercises the "not setuid" error path. To test end-to-end, install the binary setuid-root in a disposable container or VM.
 
 ## CLI Interface
 
 ```
 mom install <pkg> [pkg...]    # install one or more packages
 mom update <pkg> [pkg...]     # refresh repos, then update named packages (errors if not installed)
-mom refresh                   # refresh repo metadata only (requires group membership)
-mom --version
-mom --help
-mom --check                   # validate config and deny list, no package operations (sysadmin use)
+mom upgrade                   # refresh repos, then full system upgrade (apt-get upgrade / dnf upgrade)
+mom refresh                   # refresh repo metadata only (apt-get update / dnf makecache)
+mom --check                   # validate config, deny list, binary perms; no package operations
+mom --version | --help
 ```
 
-`-y` / `--yes` flag: suppress prompts (passed as `-y` to apt-get/dnf), same semantics as native tools.
+Global flags: `-y/--yes` (passed through as `-y`) and `--no-recommends` (`--no-install-recommends` / `--setopt=install_weak_deps=False`). Every subcommand, including `--check` and `refresh`, requires group membership.
 
-**Explicitly not supported** (by design):
-- Uninstalling or removing packages
-- Version pinning (`mom install foo=1.2.3` is not valid — package name only)
-- Adding or modifying package repositories
-- Installing from `.deb`/`.rpm` files, URLs, or internet sources directly
+**Explicitly not supported** (by design, do not add): removing packages, version pinning (`foo=1.2.3`), adding or modifying repositories, and installing from `.deb`/`.rpm` files, URLs, or other internet sources.
 
-## Privilege Model (Option A: setuid + group-restricted execute)
+## Architecture
 
-Two deployment modes, both use a **setuid-root binary**:
+`src/main.rs` owns the whole control flow. Each subcommand arm runs the same pipeline, and **the order matters for security**:
 
-| Mode | Permissions | Ownership |
-|------|-------------|-----------|
-| setuid (open) | `rwsr-xr-x` (4755) | `root:root` |
-| group-restricted | `rwsr-x---` (4750) | `root:mom` |
+1. `main()`: `libc::clearenv()` and `umask(0o077)` run **before** `Cli::parse()` or anything else can read attacker-controlled env.
+2. Check that euid == 0. Capture the real uid/gid, then `auth::drop_supplemental_groups()`.
+3. `config::Config::load()` reads `/etc/mom/mom.conf`, falling back to defaults if it is absent.
+4. `require_group_membership()`: on failure it logs a denied entry, sleeps 2s to rate-limit, and bails.
+5. `validate_packages()`: enforces the count limit (100), length limit (256), and name regex, then runs `deny::DenyList::load()` and glob-matches each name.
+6. `detect::detect_package_manager()`: apt-get vs dnf by binary existence, cross-checked against `/etc/debian_version` / `/etc/redhat-release`.
+7. `install` only: `exec::apt_package_exists_exact` / `dnf_package_exists_exact`. The literal name must equal a real package name. The allowed chars `.+-` collide with apt regex matching, the trailing `-`/`+` remove/install modifiers, and dnf `name.arch` specs, any of which would let a name bypass the deny list. `update` instead checks `exec::is_installed` (dpkg-query / rpm -q, again comparing the exact name).
+8. `require_audit_log()`: the "initiated" entry **must** reach the log file or syslog, or the operation is refused. Denial and outcome entries are best-effort.
+9. `exec::*` forks and `execve`s the package manager, then `log_outcome()` records the result.
 
-In group-restricted mode, only members of the `mom` group (or the group named in `mom.conf`) can execute the binary. In both cases the binary runs as root. Detection at runtime: effective UID = 0 confirms privilege was granted; real UID identifies the calling user.
+Module responsibilities:
+- `auth.rs`: dropping groups, uid→name, group membership checks, and group→gid lookup.
+- `config.rs`: the conf parser, plus the shared file-safety helpers `open_nofollow` and `validate_file_metadata` (open-then-fstat, TOCTOU-safe, with `FileOwnership::Root` or `RootOrGroup(gid)`). Reuse these for any new privileged file read. Config paths and proxy URLs are validated too.
+- `deny.rs`: parses the deny list (whitespace-separated globs, `#` comments). It must be owned by root, and its group must be root or the configured group. A missing file means an empty list.
+- `detect.rs`: the `PackageManager` enum. It builds all argv vectors (`install_cmd_args`, `update_cmd_args`, `upgrade_cmd_args`, …) and holds the hardcoded binary paths.
+- `exec.rs`: fork/execve, signal forwarding (SIGINT/TERM/HUP/QUIT to the child via the `CHILD_PID` atomic), and `run_capture` for queries with bounded output. `build_env()` is the **only** child environment: `PATH`, `HOME=/root`, `LANG=C`, plus the configured proxies. In the child, `setresuid(0,0,0)` (dpkg refuses ruid≠euid) and `umask(0o022)` (so apt's `_apt` user can write partial downloads) run before exec. The child calls `_exit`, never `exit`.
+- `log.rs`: `AuditLogger` writes JSON lines to the log file and to syslog (`LOG_AUTH`). `log()` returns whether at least one sink succeeded.
+- `check.rs`: `--check` diagnostics for sysadmins (config, deny list, binary mode/owner).
 
-`mom refresh` requires group membership, like all other subcommands. It runs through the setuid privilege path to gain root for `apt-get update` / `dnf makecache`.
+## Security Invariants
 
-The sysadmin sets the binary permissions manually post-install. Document `chmod 4750 /usr/bin/mom && chown root:mom /usr/bin/mom` in the man page.
+- Never use `sh -c`, `system()`, or `popen()`. Pass arguments as discrete `execve` argv entries, and use hardcoded absolute binary paths (`/usr/bin/apt-get`, `/usr/bin/dnf`, `/usr/bin/apt-cache`, dpkg-query, rpm).
+- Package names must match `^[a-zA-Z0-9][a-zA-Z0-9.+\-]*$` (`is_valid_package_name` in main.rs). Loosening this also requires revisiting the exact-name checks in step 7.
+- The deny check runs on the literal string. Any new code path that hands a user-supplied name to apt/dnf needs the same exact-name resolution, or the deny list can be bypassed (see recent commits a9842a4 and 2b65aa5).
+- Every authorization failure (not in group, denied package, invalid name, config validation failure) must be audit-logged.
+- Pass apt/dnf stdout/stderr straight through. Rely on apt/dnf's own locking; do not add a separate lock file.
 
 ## Configuration
 
-**`/etc/mom/mom.conf`** — key/value format, owned and writable only by root. mom must validate ownership and permissions before reading; refuse to run if the file is world-writable or not owned by root.
+`/etc/mom/mom.conf` uses a key = value format. It must be root-owned and not group- or world-writable. Keys and defaults: `group` (`mom`), `deny_list` (`/etc/mom/deny.list`), `log_file` (`/var/log/mom.log`), `http_proxy`, `https_proxy` (proxy vars are passed only to the child).
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `group` | `mom` | Group eligible to execute mom |
-| `deny_list` | `/etc/mom/deny.list` | Path to package deny list (can be on shared FS) |
-| `log_file` | `/var/log/mom.log` | Audit log path |
-| `http_proxy` | _(none)_ | Proxy URL passed explicitly to apt-get/dnf |
-| `https_proxy` | _(none)_ | Proxy URL passed explicitly to apt-get/dnf |
+Deny list sources live in `deny/`: a generic `deny.list` plus `deny.apt.list` / `deny.dnf.list`. At install time, the package postinst scripts concatenate generic + OS-specific into `/etc/mom/deny.list`, owned `root:mom` with mode 640, but only if that file is empty or missing.
 
-If `mom.conf` does not exist, fall back to safe defaults (all values above).
+Audit log format is one JSON object per line: `timestamp, real_uid, real_user, operation, packages, outcome (initiated|success|failed|denied), detail`.
 
-**Deny list file** (path configured via `deny_list`): one or more entries per line (space-separated), glob patterns supported (e.g., `python3-*`). The file must be owned by the `mom` group; refuse to run if ownership check fails. If the file does not exist, treat as empty (no denials). Comments with `#` should be supported.
+## Packaging & Release
 
-## Security Architecture
-
-### Environment Sanitization
-- **Strip the entire environment** before exec'ing `apt-get`/`dnf`.
-- Use hardcoded absolute paths: `/usr/bin/apt-get`, `/usr/bin/dnf`.
-- Never use `sh -c` or shell interpolation.
-- Pass arguments as discrete `execve` argv entries.
-- Proxy settings from `mom.conf` are passed explicitly as `http_proxy`/`https_proxy` env vars to the child only.
-
-### Input Validation
-- Package names validated against strict regex: `^[a-zA-Z0-9][a-zA-Z0-9.+\-]*$`.
-- No shell metacharacters permitted in any argument.
-- Check package name against deny list (glob matching) before exec.
-
-### Privilege Hardening
-- Drop supplemental groups immediately after startup.
-- Use `execve` directly (never `system()` / `popen()`).
-- `mom update foo` must verify the package is already installed before attempting update; error out if not.
-
-### Concurrency
-- Rely on apt-get/dnf's own locking; do not implement a separate lock file.
-
-### Output
-- Pass stdout/stderr from apt-get/dnf directly to the user (no capture or filtering).
-
-### Signal Handling
-- Forward signals (including SIGINT / Ctrl+C) to the child apt-get/dnf process.
-
-## Audit Logging
-
-All invocations logged to `/var/log/mom.log` (path configurable) in **JSON**, one object per line:
-
-```json
-{"timestamp": "2026-03-25T12:00:00Z", "real_uid": 1001, "real_user": "alice", "operation": "install", "packages": ["curl"], "outcome": "success", "detail": null}
-{"timestamp": "2026-03-25T12:01:00Z", "real_uid": 1002, "real_user": "bob", "operation": "install", "packages": ["python3-dev"], "outcome": "denied", "detail": "package matches deny list pattern python3-*"}
-```
-
-Failed authorization attempts (not in group, package denied, config validation failure) must also be logged. Also log to syslog.
-
-Log rotation handled via a `logrotate.d` config included in the full package.
-
-## Package Manager Detection
-
-At runtime, detect by checking binary existence:
-- `/usr/bin/apt-get` present → Debian/Ubuntu mode
-- `/usr/bin/dnf` present → RHEL mode
-- Both or neither → error with clear message
-
-Also verify the detected system matches expectations (e.g., check `/etc/debian_version` or `/etc/redhat-release`).
-
-## CI/CD (GitHub Actions)
-
-Two workflows in `.github/workflows/`:
-
-**`ci.yml`** — runs on every push/PR to `main`:
-- `cargo fmt --check` — format enforcement
-- `cargo clippy` — lint with `-D warnings`
-- `cargo test` — full test suite
-- `cargo audit` — dependency vulnerability scan
-- Cross-compilation build check for x86_64 and aarch64
-
-**`release.yml`** — triggered by pushing a version tag (`v*.*.*`):
-1. Builds release binaries for x86_64 and aarch64
-2. Builds `.deb` packages in distro-specific containers (Debian bookworm, Ubuntu 22.04/24.04/26.04)
-3. Builds `.rpm` packages in distro-specific containers (Rocky Linux 9, AlmaLinux 10 — RHEL-compatible)
-4. Publishes all artifacts + standalone binaries to a GitHub Release
-
-To cut a release:
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+- `.github/workflows/ci.yml` runs fmt, clippy, test, audit, and x86_64/aarch64 cross builds on push/PR to `main`.
+- `.github/workflows/release.yml` runs on a `v*.*.*` tag. It builds binaries, then assembles the `.deb` (Debian bookworm, Ubuntu 22.04/24.04/26.04) and `.rpm` (Rocky 9, Alma 10, Amazon Linux 2023) packages **inline in the workflow**: the DEBIAN control files, the rpm spec, the postinst logic, the default mom.conf, and the logrotate config are all generated there. Packaging changes usually go in release.yml.
+- The `debian/` directory is a separate dh/cargo source-package layout (for distro-style builds). Keep it in sync with release.yml when packaging behavior changes.
+- Shipped extras: `doc/mom.8` (man page, which documents `chmod 4750 /usr/bin/mom && chown root:mom /usr/bin/mom`), `completions/mom.bash`, and `packaging/logrotate.d/mom`. Update the man page, completions, and README when the CLI changes.
+- Package versions come from the git tag (`GITHUB_REF_NAME`, which must be semver), not from Cargo.toml. Keep `Cargo.toml` `version` in step anyway so `mom --version` matches. Release with `git tag vX.Y.Z && git push origin vX.Y.Z`.
